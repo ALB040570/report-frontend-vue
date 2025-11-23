@@ -13,7 +13,7 @@
           </p>
         </div>
         <div
-          v-if="hasPlanData || (!isPlanSource && hasResultData)"
+          v-if="hasPlanData || (!isPivotSource && hasResultData)"
           class="step__status"
         >
           <span class="dot dot--success"></span>
@@ -28,6 +28,7 @@
             <select v-model="dataSource">
               <option disabled value="">Выберите источник</option>
               <option value="plans">Планы</option>
+              <option value="parameters">Параметры</option>
               <option value="objects">Объекты</option>
               <option value="defects">Дефекты</option>
               <option value="kpi">KPI</option>
@@ -55,15 +56,15 @@
             :disabled="!dataSource || planLoading"
           >
             {{
-              isPlanSource
+              isPivotSource
                 ? planLoading
                   ? 'Загрузка...'
-                  : 'Загрузить план'
+                  : `Загрузить ${pivotSourceLabel}`
                 : 'Сформировать'
             }}
           </button>
           <button
-            v-if="isPlanSource"
+            v-if="isPivotSource"
             class="btn-outline"
             type="button"
             @click="refreshPlanFields"
@@ -73,11 +74,19 @@
           </button>
         </div>
 
-        <div v-if="isPlanSource" class="step__info">
-          <p class="muted">
-            POST /dtj/api/plan · data/loadPlan<br />
-            Параметры: {{ planPayloadDisplay }}
-          </p>
+        <div v-if="isPivotSource" class="step__info">
+          <template v-if="dataSource === 'plans'">
+            <p class="muted">
+              POST /dtj/api/plan · data/loadPlan<br />
+              Параметры: {{ planPayloadDisplay }}
+            </p>
+          </template>
+          <template v-else-if="dataSource === 'parameters'">
+            <p class="muted">
+              POST http://45.8.116.32/dtj/api/inspections · data/loadParameterLog<br />
+              Параметры: {{ parameterPayloadDisplay }}
+            </p>
+          </template>
           <p class="muted" v-if="hasPlanData">
             Загружено записей: <strong>{{ planRecords.length }}</strong>
           </p>
@@ -86,7 +95,7 @@
         <p v-if="planError" class="error">{{ planError }}</p>
         <p v-else-if="planLoading" class="muted">Получаем данные плана...</p>
 
-        <details v-if="isPlanSource && filteredPlanRecords.length">
+        <details v-if="isPivotSource && filteredPlanRecords.length">
           <summary>Сырые записи ({{ filteredPlanRecords.length }})</summary>
           <pre>{{ filteredPlanRecords }}</pre>
         </details>
@@ -94,7 +103,7 @@
     </article>
 
     <article
-      v-if="isPlanSource"
+      v-if="isPivotSource"
       class="step"
       :class="{ 'step--disabled': !hasPlanData }"
     >
@@ -360,7 +369,7 @@
     <article
       class="step"
       :class="{
-        'step--disabled': isPlanSource ? !pivotReady : !hasResultData,
+        'step--disabled': isPivotSource ? !pivotReady : !hasResultData,
       }"
     >
       <header class="step__header">
@@ -396,7 +405,7 @@
             Сохранить как шаблон
           </button>
           <button
-            v-if="isPlanSource"
+            v-if="isPivotSource"
             class="btn-outline"
             type="button"
             @click="exportToCsv"
@@ -406,7 +415,15 @@
           </button>
         </div>
 
-        <div v-if="!isPlanSource && hasResultData" class="result">
+        <div v-if="showChart" class="chart-panel">
+          <ReportChart
+            :viz-type="vizType"
+            :chart-data="chartConfig.data"
+            :chart-options="chartConfig.options"
+          />
+        </div>
+
+        <div v-if="!isPivotSource && hasResultData" class="result">
           <pre v-if="vizType === 'table'">{{ result }}</pre>
           <div v-else>Заглушка визуализации: {{ vizType }}</div>
         </div>
@@ -422,6 +439,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { api } from '@/shared/api/http'
 import { DEFAULT_PLAN_PAYLOAD, fetchPlanRecords } from '@/shared/api/plan'
+import { DEFAULT_PARAMETER_PAYLOAD, fetchParameterRecords } from '@/shared/api/parameter'
+import ReportChart from '@/components/ReportChart.vue'
 
 const dataSource = ref('')
 const vizType = ref('table')
@@ -433,15 +452,21 @@ const planFields = ref([])
 const planLoading = ref(false)
 const planError = ref('')
 const planPayloadDisplay = JSON.stringify(DEFAULT_PLAN_PAYLOAD)
+const parameterPayloadDisplay = JSON.stringify(DEFAULT_PARAMETER_PAYLOAD)
 
-const isPlanSource = computed(() => dataSource.value === 'plans')
+const pivotSourceValues = ['plans', 'parameters']
+const isPivotSource = computed(() => pivotSourceValues.includes(dataSource.value))
 const hasResultData = computed(() => {
   const value = result.value
   if (Array.isArray(value)) return value.length > 0
   if (value && typeof value === 'object') return Object.keys(value).length > 0
   return Boolean(value)
 })
-const hasPlanData = computed(() => isPlanSource.value && planFields.value.length > 0)
+const hasPlanData = computed(() => isPivotSource.value && planFields.value.length > 0)
+const pivotSourceLabel = computed(() => {
+  if (dataSource.value === 'parameters') return 'параметры'
+  return 'план'
+})
 
 const pivotSections = [
   { key: 'filters', title: 'Фильтры' },
@@ -464,21 +489,36 @@ const aggregatorOptions = [
   { value: 'sum', label: 'Сумма' },
   { value: 'avg', label: 'Среднее' },
 ]
+const supportedChartTypes = ['bar', 'line', 'pie']
+const chartPalette = ['#2b6cb0', '#f97316', '#0ea5e9', '#10b981', '#ef4444', '#8b5cf6']
 
 const CONFIG_STORAGE_KEY = 'report-pivot-configs'
 const savedConfigs = ref(loadSavedConfigs())
 const selectedConfigId = ref('')
 const configName = ref('')
 
+function isPivotValue(value) {
+  return pivotSourceValues.includes(value)
+}
+
 watch(
   () => dataSource.value,
   (value, prev) => {
-    if (value === 'plans' && prev !== 'plans') {
+    const nextIsPivot = isPivotValue(value)
+    const prevIsPivot = isPivotValue(prev)
+    if (nextIsPivot && !prevIsPivot) {
+      resetPlanState()
       loadPlanFields(true)
       ensureMetricExists()
+      return
     }
-    if (value !== 'plans' && prev === 'plans') {
+    if (!nextIsPivot && prevIsPivot) {
       resetPlanState()
+      return
+    }
+    if (nextIsPivot && prevIsPivot && value !== prev) {
+      resetPlanState()
+      loadPlanFields(true)
     }
   },
 )
@@ -623,14 +663,82 @@ const pivotView = computed(() => {
 })
 const pivotReady = computed(() => Boolean(pivotView.value && pivotView.value.rows.length))
 const canUseVizSettings = computed(() =>
-  isPlanSource.value ? pivotReady.value : hasResultData.value,
+  isPivotSource.value ? pivotReady.value : hasResultData.value,
 )
 const hasSelectedFilterValues = computed(() =>
   Object.values(filterValues).some((values) => values && values.length),
 )
+const chartConfig = computed(() => {
+  if (!isPivotSource.value) return null
+  if (!pivotReady.value) return null
+  if (!supportedChartTypes.includes(vizType.value)) return null
+  const view = pivotView.value
+  if (!view || !view.rows.length) return null
+  const labels = view.rows.map((row) => row.label || '—')
+  if (!view.rowTotalHeaders.length) return null
+  const datasets = view.rowTotalHeaders.map((header, index) => {
+    const color = chartPalette[index % chartPalette.length]
+    const data = view.rows.map((row) => {
+      const total = row.totals.find((item) => item.metricId === header.metricId)
+      return typeof total?.value === 'number' ? Number(total.value) : 0
+    })
+    return {
+      label: header.label,
+      data,
+      backgroundColor: color,
+      borderColor: color,
+      borderWidth: 2,
+      tension: 0.3,
+      fill: vizType.value !== 'line',
+    }
+  })
+  const baseOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { position: 'bottom' },
+      tooltip: { mode: 'index', intersect: false },
+    },
+  }
+  if (vizType.value === 'pie') {
+    const pieDataset = datasets[0]
+    const pieColors = labels.map((_, idx) => chartPalette[idx % chartPalette.length])
+    return {
+      data: {
+        labels,
+        datasets: [
+          {
+            ...pieDataset,
+            backgroundColor: pieColors,
+            borderColor: '#fff',
+            borderWidth: 1,
+            fill: true,
+          },
+        ],
+      },
+      options: baseOptions,
+    }
+  }
+  return {
+    data: {
+      labels,
+      datasets,
+    },
+    options: {
+      ...baseOptions,
+      scales: {
+        x: { ticks: { autoSkip: false } },
+        y: { beginAtZero: true },
+      },
+    },
+  }
+})
+const showChart = computed(
+  () => isPivotSource.value && chartConfig.value && vizType.value !== 'table',
+)
 
 async function run() {
-  if (isPlanSource.value) {
+  if (isPivotSource.value) {
     await loadPlanFields(true)
     return
   }
@@ -656,14 +764,19 @@ async function refreshPlanFields() {
 }
 
 async function loadPlanFields(force = false) {
-  if (!isPlanSource.value) return
+  if (!isPivotSource.value) return
   if (planLoading.value) return
   if (!force && planFields.value.length) return
 
   planLoading.value = true
   planError.value = ''
   try {
-    const records = await fetchPlanRecords()
+    let records = []
+    if (dataSource.value === 'plans') {
+      records = await fetchPlanRecords()
+    } else if (dataSource.value === 'parameters') {
+      records = await fetchParameterRecords()
+    }
     planRecords.value = records
     result.value = records
     planFields.value = extractFieldDescriptors(records)
@@ -778,16 +891,20 @@ function buildPivotView({ records, rows, columns, metrics }) {
     const cells = columnEntries.map((column) => {
       const cellKey = `${row.key}||${column.baseKey}||${column.metricId}`
       const bucket = cellMap.get(cellKey)
+      const value = finalizeBucket(bucket, column.aggregator)
       return {
         key: cellKey,
-        display: formatNumber(finalizeBucket(bucket, column.aggregator)),
+        display: formatNumber(value),
+        value,
       }
     })
     const totals = metrics.map((metric) => {
       const bucket = getNestedBucket(rowMetricTotals, row.key, metric.id)
+      const value = finalizeBucket(bucket, metric.aggregator)
       return {
         metricId: metric.id,
-        display: formatNumber(finalizeBucket(bucket, metric.aggregator)),
+        display: formatNumber(value),
+        value,
       }
     })
     return {
@@ -800,9 +917,11 @@ function buildPivotView({ records, rows, columns, metrics }) {
 
   const columnsResult = columnEntries.map((column) => {
     const bucket = getNestedBucket(columnMetricTotals, column.baseKey, column.metricId)
+    const value = finalizeBucket(bucket, column.aggregator)
     return {
       ...column,
-      totalDisplay: formatNumber(finalizeBucket(bucket, column.aggregator)),
+      totalDisplay: formatNumber(value),
+      value,
     }
   })
 
@@ -1514,6 +1633,13 @@ function createId() {
   border-radius: 12px;
   padding: 12px;
   background: var(--s360-color-panel, #f9fafb);
+}
+.chart-panel {
+  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--s360-color-surface, #fff);
+  min-height: 360px;
 }
 .empty-state {
   border: 1px dashed #d1d5db;
