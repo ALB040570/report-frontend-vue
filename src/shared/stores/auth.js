@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import {
   fetchCurrentUserRequest,
+  fetchPersonalInfoRequest,
   loginRequest,
   logoutRequest,
 } from '@/shared/api/auth'
@@ -14,6 +15,7 @@ function extractErrorMessage(err) {
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null,
+    personalInfo: null,
     loading: false,
     error: null,
     initialized: false,
@@ -22,9 +24,25 @@ export const useAuthStore = defineStore('auth', {
     isAuthenticated: (state) => Boolean(state.user),
   },
   actions: {
+    async loadPersonalInfo(userId) {
+      if (!userId) {
+        this.personalInfo = null
+        return null
+      }
+      try {
+        const { data } = await fetchPersonalInfoRequest(userId)
+        const [record] = data?.result?.records || []
+        this.personalInfo = record || null
+      } catch (err) {
+        console.warn('Не удалось получить персональные данные', err)
+        this.personalInfo = null
+      }
+      return this.personalInfo
+    },
     async loadUser() {
       const { data } = await fetchCurrentUserRequest()
       this.user = data?.result || null
+      await this.loadPersonalInfo(this.user?.id)
       return this.user
     },
     async checkSession() {

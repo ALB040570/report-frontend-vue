@@ -2,7 +2,7 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import path from 'path'
 
-const proxyPaths = ['/api', '/auth', '/userapi']
+const proxyPaths = ['/api', '/auth', '/userapi', '/dtj', '/userinfo']
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')

@@ -29,6 +29,14 @@ export function fetchCurrentUserRequest() {
   )
 }
 
+export function fetchPersonalInfoRequest(userId) {
+  return authApi.post(
+    '/userinfo',
+    { method: 'data/getPersonnalInfo', params: [userId] },
+    { headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
 function resolveAuthBaseURL() {
   const devFallback = DEV_PROXY_BASE || ''
 
