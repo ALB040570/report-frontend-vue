@@ -22,83 +22,215 @@
       </header>
 
       <div class="step__body">
-        <div class="form-grid">
-          <label class="field">
-            <span class="field__label">Источник данных</span>
-            <select v-model="dataSource">
-              <option disabled value="">Выберите источник</option>
-              <option value="plans">Планы</option>
-              <option value="parameters">Параметры</option>
-              <option value="objects">Объекты</option>
-              <option value="defects">Дефекты</option>
-              <option value="kpi">KPI</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field__label">Период</span>
-            <input v-model="filters.period" placeholder="2025-01..2025-12" />
-          </label>
-          <label class="field">
-            <span class="field__label">Участок / зона</span>
-            <input v-model="filters.area" placeholder="Участок/зона" />
-          </label>
-          <label class="field">
-            <span class="field__label">Объект или ID</span>
-            <input v-model="filters.object" placeholder="Объект/ID" />
-          </label>
+        <div class="source-panel">
+          <div class="source-panel__selector">
+            <label class="field">
+              <span class="field__label">Источники данных</span>
+              <n-select
+                v-model:value="dataSource"
+                :options="sourceOptions"
+                placeholder="Выберите или начните вводить источник"
+                filterable
+                clearable
+                class="combobox"
+                :disabled="planLoading"
+                size="large"
+                @search="handleSourceSearch"
+              >
+                <template #action v-if="canCreateSourceFromSearch">
+                  <div class="select-action" @mousedown.prevent @click="startCreatingSource(pendingNewSourceName)">
+                    Создать источник «{{ pendingNewSourceName }}»
+                  </div>
+                </template>
+              </n-select>
+            </label>
+            <p class="muted combobox__hint">
+              Найдите существующий источник или введите новое имя, чтобы создать его.
+            </p>
+          </div>
+
+          <div class="source-panel__actions">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  quaternary
+                  circle
+                  size="large"
+                  @click="executeCurrentSource"
+                  :disabled="!canSendRequest || planLoading"
+                  aria-label="Отправить запрос"
+                >
+                  <span class="icon icon-send" />
+                </n-button>
+              </template>
+              {{ planLoading ? 'Выполняем запрос' : 'Отправить данные' }}
+            </n-tooltip>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  quaternary
+                  circle
+                  size="large"
+                  @click="toggleDetails"
+                  :disabled="!canToggleDetails"
+                  aria-label="Переключить детали"
+                >
+                  <span class="icon" :class="detailsIconClass" />
+                </n-button>
+              </template>
+              {{ detailsTooltipLabel }}
+            </n-tooltip>
+          </div>
         </div>
 
-        <div class="step__actions">
-          <button
-            class="btn-primary"
-            type="button"
-            @click="run"
-            :disabled="!dataSource || planLoading"
+        <div v-if="shouldShowDetails" class="source-panel__details">
+          <div class="source-details-grid">
+            <label class="field">
+              <span class="field__label">Название источника</span>
+              <n-input v-model:value="sourceDraft.name" placeholder="Например: План на ноябрь" size="large" />
+            </label>
+            <label class="field">
+              <span class="field__label">URL</span>
+              <n-input v-model:value="sourceDraft.url" placeholder="/dtj/api/plan" size="large" />
+            </label>
+            <label class="field">
+              <span class="field__label">Метод</span>
+              <n-select v-model:value="sourceDraft.httpMethod" :options="httpMethodOptions" size="large" />
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field__label">Метод API</span>
+            <n-input v-model:value="rpcMethod" placeholder="data/loadPlan" size="large" />
+            <span class="muted" v-if="!structuredBodyAvailable && !hasPrimitiveParams">
+              Добавьте параметры в формате объекта в «Raw body», чтобы редактировать их по ключам.
+            </span>
+          </label>
+
+          <div
+            v-if="structuredBodyAvailable && parameterKeys.length"
+            class="params-grid"
           >
-            {{
-              isPivotSource
-                ? planLoading
-                  ? 'Загрузка...'
-                  : `Загрузить ${pivotSourceLabel}`
-                : 'Сформировать'
-            }}
-          </button>
-          <button
-            v-if="isPivotSource"
-            class="btn-outline"
-            type="button"
-            @click="refreshPlanFields"
-            :disabled="!hasPlanData || planLoading"
+            <label v-for="key in parameterKeys" :key="key" class="field">
+              <span class="field__label">{{ key }}</span>
+              <n-input v-model:value="bodyParams[key]" />
+            </label>
+          </div>
+          <div
+            v-else-if="hasPrimitiveParams"
+            class="params-grid params-grid--compact"
           >
-            Обновить данные
-          </button>
+            <label v-for="(value, index) in primitiveParams" :key="`primitive-${index}`" class="field">
+              <span class="field__label">params[{{ index }}]</span>
+              <n-input v-model:value="primitiveParams[index]" />
+            </label>
+          </div>
+          <p v-else class="muted">
+            Добавьте параметры в «Raw body», чтобы редактировать их здесь.
+          </p>
+
+          <label class="field">
+            <span class="field__label">Raw body</span>
+            <n-input
+              v-model:value="sourceDraft.rawBody"
+              type="textarea"
+              :autosize="{ minRows: 6, maxRows: 14 }"
+              placeholder='{"method":"data/loadPlan","params":[{...}]}'
+            />
+            <span v-if="rawBodyError" class="error">{{ rawBodyError }}</span>
+          </label>
+
+          <div class="source-actions">
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  quaternary
+                  circle
+                  size="large"
+                  @click="saveCurrentSource"
+                  :disabled="!canSaveSource"
+                  aria-label="Сохранить источник"
+                >
+                  <span class="icon icon-save" />
+                </n-button>
+              </template>
+              Сохранить источник
+            </n-tooltip>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  quaternary
+                  circle
+                  size="large"
+                  @click="executeCurrentSource"
+                  :disabled="!canSendRequest || planLoading"
+                  aria-label="Отправить запрос"
+                >
+                  <span class="icon icon-send" />
+                </n-button>
+              </template>
+              Отправить запрос
+            </n-tooltip>
+          </div>
         </div>
 
-        <div v-if="isPivotSource" class="step__info">
-          <template v-if="dataSource === 'plans'">
-            <p class="muted">
-              POST /dtj/api/plan · data/loadPlan<br />
-              Параметры: {{ planPayloadDisplay }}
-            </p>
-          </template>
-          <template v-else-if="dataSource === 'parameters'">
-            <p class="muted">
-              POST http://45.8.116.32/dtj/api/inspections · data/loadParameterLog<br />
-              Параметры: {{ parameterPayloadDisplay }}
-            </p>
-          </template>
+        <div class="step__info" v-if="shouldShowDetails">
+          <p class="muted">
+            {{ sourceDraft.httpMethod }} · {{ sourceDraft.url || 'URL не указан' }}
+          </p>
+          <p class="muted" v-if="structuredBodyAvailable">
+            Метод API: <strong>{{ rpcMethod || 'не указан' }}</strong>
+          </p>
           <p class="muted" v-if="hasPlanData">
             Загружено записей: <strong>{{ planRecords.length }}</strong>
           </p>
         </div>
 
         <p v-if="planError" class="error">{{ planError }}</p>
-        <p v-else-if="planLoading" class="muted">Получаем данные плана...</p>
+        <p v-else-if="planLoading" class="muted">Выполняем запрос...</p>
 
-        <details v-if="isPivotSource && filteredPlanRecords.length">
-          <summary>Сырые записи ({{ filteredPlanRecords.length }})</summary>
-          <pre>{{ filteredPlanRecords }}</pre>
-        </details>
+        <div v-if="hasResultData" class="result-tabs">
+          <div class="tabs">
+            <button
+              type="button"
+              class="tab"
+              :class="{ 'tab--active': activeResultTab === 'json' }"
+              @click="activeResultTab = 'json'"
+            >
+              JSON
+            </button>
+            <button
+              type="button"
+              class="tab"
+              :class="{ 'tab--active': activeResultTab === 'preview' }"
+              @click="activeResultTab = 'preview'"
+            >
+              Preview
+            </button>
+          </div>
+          <div class="tabs__body">
+            <pre v-if="activeResultTab === 'json'">{{ formattedResultJson }}</pre>
+            <div v-else class="preview-table">
+              <table v-if="previewColumns.length && previewRows.length" class="table-s360">
+                <thead>
+                  <tr>
+                    <th v-for="column in previewColumns" :key="column.key">
+                      {{ column.label }}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, rowIndex) in previewRows" :key="rowIndex">
+                    <td v-for="column in previewColumns" :key="column.key">
+                      {{ formatValue(row[column.key]) }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="muted">Нет данных для предпросмотра.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </article>
 
@@ -568,7 +700,7 @@
         </div>
 
         <div v-if="!isPivotSource && hasResultData" class="result">
-          <pre v-if="vizType === 'table'">{{ result }}</pre>
+          <pre v-if="vizType === 'table'">{{ formattedResultJson }}</pre>
           <div v-else>Заглушка визуализации: {{ vizType }}</div>
         </div>
         <p v-else-if="!canUseVizSettings" class="muted">
@@ -581,11 +713,11 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { api } from '@/shared/api/http'
-import { DEFAULT_PLAN_PAYLOAD, fetchPlanRecords } from '@/shared/api/plan'
-import { DEFAULT_PARAMETER_PAYLOAD, fetchParameterRecords } from '@/shared/api/parameter'
+import { NButton, NTooltip, NSelect, NInput } from 'naive-ui'
 import ReportChart from '@/components/ReportChart.vue'
 import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
+import { sendDataSourceRequest } from '@/shared/api/dataSource'
+import { useDataSourcesStore } from '@/shared/stores/dataSources'
 import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 import {
   buildPivotView,
@@ -595,20 +727,54 @@ import {
   formatNumber,
 } from '@/shared/lib/pivotUtils'
 
+const dataSourcesStore = useDataSourcesStore()
+const dataSources = computed(() => dataSourcesStore.sources)
 const dataSource = ref('')
 const vizType = ref('table')
-const filters = ref({ period: '', area: '', object: '' })
-const result = ref([])
+const result = ref(null)
+const isCreatingSource = ref(false)
+const sourceSearch = ref('')
+const pendingNewSourceName = ref('')
+const EMPTY_BODY_TEMPLATE = JSON.stringify(
+  {
+    method: '',
+    params: [{}],
+  },
+  null,
+  2,
+)
+const HTTP_METHODS = ['POST', 'GET', 'PUT', 'PATCH']
+const sourceDraft = reactive(createBlankSource())
+const rawBodyError = ref('')
+const structuredBodyAvailable = ref(false)
+const rpcMethod = ref('')
+const bodyParams = reactive({})
+const bodyParamTypes = reactive({})
+const primitiveParams = ref([])
+const activeResultTab = ref('json')
+const detailsVisible = ref(false)
+const paramContainerType = ref('array')
 
 const planRecords = ref([])
 const planFields = ref([])
 const planLoading = ref(false)
 const planError = ref('')
-const planPayloadDisplay = JSON.stringify(DEFAULT_PLAN_PAYLOAD)
-const parameterPayloadDisplay = JSON.stringify(DEFAULT_PARAMETER_PAYLOAD)
-
-const pivotSourceValues = ['plans', 'parameters']
-const isPivotSource = computed(() => pivotSourceValues.includes(dataSource.value))
+const selectedSource = computed(
+  () => dataSources.value.find((source) => source.id === dataSource.value) || null,
+)
+const sourceOptions = computed(() =>
+  dataSources.value.map((source) => ({
+    label: source.name,
+    value: source.id,
+  })),
+)
+const pivotSourceIds = computed(() =>
+  dataSources.value.filter((source) => source.supportsPivot !== false).map((source) => source.id),
+)
+const isPivotSource = computed(() => {
+  if (isCreatingSource.value) return true
+  return pivotSourceIds.value.includes(dataSource.value)
+})
 const hasResultData = computed(() => {
   const value = result.value
   if (Array.isArray(value)) return value.length > 0
@@ -616,10 +782,60 @@ const hasResultData = computed(() => {
   return Boolean(value)
 })
 const hasPlanData = computed(() => isPivotSource.value && planFields.value.length > 0)
-const pivotSourceLabel = computed(() => {
-  if (dataSource.value === 'parameters') return 'параметры'
-  return 'план'
+const hasSourceContext = computed(() => Boolean(selectedSource.value) || isCreatingSource.value)
+const shouldShowDetails = computed(() => hasSourceContext.value && detailsVisible.value)
+const canCreateSourceFromSearch = computed(() => Boolean(pendingNewSourceName.value))
+const canSaveSource = computed(() => {
+  if (!shouldShowDetails.value) return false
+  const hasName = Boolean(sourceDraft.name?.trim())
+  const hasUrl = Boolean(sourceDraft.url?.trim())
+  const hasBody =
+    sourceDraft.httpMethod === 'GET'
+      ? true
+      : Boolean(sourceDraft.rawBody?.trim()) && !rawBodyError.value
+  return hasName && hasUrl && hasBody
 })
+const canSendRequest = computed(() => {
+  const hasUrl = Boolean(sourceDraft.url?.trim())
+  if (!hasUrl) return false
+  if (sourceDraft.httpMethod === 'GET') {
+    return !rawBodyError.value
+  }
+  return Boolean(sourceDraft.rawBody?.trim()) && !rawBodyError.value
+})
+const canToggleDetails = computed(() => hasSourceContext.value)
+const parameterKeys = computed(() => Object.keys(bodyParams))
+const hasPrimitiveParams = computed(() => primitiveParams.value.length > 0)
+const detailsTooltipLabel = computed(() =>
+  shouldShowDetails.value ? 'Скрыть детали' : 'Показать детали',
+)
+const detailsIconClass = computed(() =>
+  shouldShowDetails.value ? 'icon-close' : 'icon-gear',
+)
+const httpMethodOptions = HTTP_METHODS.map((method) => ({
+  label: method,
+  value: method,
+}))
+const formattedResultJson = computed(() => {
+  if (!hasResultData.value) return ''
+  try {
+    return JSON.stringify(result.value, null, 2)
+  } catch {
+    return String(result.value)
+  }
+})
+const previewColumns = computed(() => {
+  if (planFields.value.length) return planFields.value
+  const firstRecord = planRecords.value[0]
+  if (firstRecord && typeof firstRecord === 'object') {
+    return Object.keys(firstRecord).map((key) => ({
+      key,
+      label: FIELD_ALIASES[key] || humanizeKey(key),
+    }))
+  }
+  return []
+})
+const previewRows = computed(() => planRecords.value.slice(0, 100))
 
 const pivotSections = [
   { key: 'filters', title: 'Фильтры' },
@@ -653,6 +869,17 @@ const resizingColumns = ref(false)
 const resizingRows = ref(false)
 const collapsedRowKeys = reactive({})
 
+function resetRowCollapse() {
+  Object.keys(collapsedRowKeys).forEach((key) => delete collapsedRowKeys[key])
+}
+function toggleRowCollapse(rowKey) {
+  if (!rowKey) return
+  collapsedRowKeys[rowKey] = !collapsedRowKeys[rowKey]
+}
+function isRowCollapsed(rowKey) {
+  return Boolean(collapsedRowKeys[rowKey])
+}
+
 const aggregatorOptions = [
   { value: 'count', label: 'Количество' },
   { value: 'sum', label: 'Сумма' },
@@ -667,30 +894,201 @@ const selectedConfigId = ref('')
 const configName = ref('')
 const pageBuilderStore = usePageBuilderStore()
 
-function isPivotValue(value) {
-  return pivotSourceValues.includes(value)
-}
+watch(
+  dataSources,
+  (list) => {
+    if (!list.length) {
+      if (!isCreatingSource.value) {
+        dataSource.value = ''
+      }
+      return
+    }
+    if (!isCreatingSource.value && !list.find((item) => item.id === dataSource.value)) {
+      dataSource.value = list[0].id
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  selectedSource,
+  (source) => {
+    if (!source) {
+      if (!isCreatingSource.value) {
+        resetSourceDraft()
+        detailsVisible.value = false
+      }
+      return
+    }
+    isCreatingSource.value = false
+    loadDraftFromSource(source)
+    sourceSearch.value = source.name || ''
+    detailsVisible.value = false
+  },
+  { immediate: true },
+)
+
+watch(
+  () => sourceSearch.value,
+  (value) => {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      pendingNewSourceName.value = ''
+      return
+    }
+    const match = dataSources.value.find(
+      (source) => source.name.toLowerCase() === trimmed.toLowerCase(),
+    )
+    if (match && !isCreatingSource.value) {
+      dataSource.value = match.id
+      pendingNewSourceName.value = ''
+    } else {
+      pendingNewSourceName.value = match ? '' : trimmed
+    }
+  },
+)
 
 watch(
   () => dataSource.value,
   (value, prev) => {
-    const nextIsPivot = isPivotValue(value)
-    const prevIsPivot = isPivotValue(prev)
-    if (nextIsPivot && !prevIsPivot) {
+    if (value === prev) return
+    pendingNewSourceName.value = ''
+    resetPlanState()
+  },
+)
+
+watch(
+  () => isCreatingSource.value,
+  (next, prev) => {
+    if (next && !prev) {
       resetPlanState()
-      loadPlanFields(true)
-      ensureMetricExists()
-      return
-    }
-    if (!nextIsPivot && prevIsPivot) {
-      resetPlanState()
-      return
-    }
-    if (nextIsPivot && prevIsPivot && value !== prev) {
-      resetPlanState()
-      loadPlanFields(true)
     }
   },
+)
+
+let syncingFromBody = false
+let syncingFromEditors = false
+
+watch(
+  () => sourceDraft.rawBody,
+  (raw) => {
+    if (syncingFromEditors) return
+    const value = raw?.trim()
+    if (!value) {
+      rawBodyError.value = ''
+      structuredBodyAvailable.value = false
+      syncingFromBody = true
+      rpcMethod.value = ''
+      paramContainerType.value = 'array'
+      syncReactiveObject(bodyParams, {})
+      syncReactiveObject(bodyParamTypes, {})
+      primitiveParams.value = []
+      syncingFromBody = false
+      return
+    }
+    try {
+      const parsed = JSON.parse(value)
+      rawBodyError.value = ''
+      const methodValue = typeof parsed.method === 'string' ? parsed.method : ''
+      let paramPayload = null
+      let container = 'array'
+      if (Array.isArray(parsed.params)) {
+        const firstEntry = parsed.params[0]
+        if (firstEntry && typeof firstEntry === 'object' && !Array.isArray(firstEntry)) {
+          paramPayload = firstEntry
+        } else if (parsed.params.length) {
+          primitiveParams.value = parsed.params.map((item) => formatPrimitiveParam(item))
+        }
+      } else if (parsed.params && typeof parsed.params === 'object') {
+        paramPayload = parsed.params
+        container = 'object'
+      }
+      syncingFromBody = true
+      rpcMethod.value = methodValue
+      paramContainerType.value = container
+      structuredBodyAvailable.value = Boolean(paramPayload)
+      if (!paramPayload) {
+        if (!Array.isArray(parsed.params) || !parsed.params.length) {
+          primitiveParams.value = []
+        }
+      } else {
+        primitiveParams.value = []
+      }
+      if (paramPayload) {
+        syncReactiveObject(bodyParams, formatParamsForEditors(paramPayload))
+        syncReactiveObject(bodyParamTypes, detectParamTypes(paramPayload))
+      } else {
+        syncReactiveObject(bodyParams, {})
+        syncReactiveObject(bodyParamTypes, {})
+      }
+      syncingFromBody = false
+    } catch (err) {
+      rawBodyError.value = err.message
+      structuredBodyAvailable.value = false
+      syncingFromBody = true
+      paramContainerType.value = 'array'
+      syncReactiveObject(bodyParams, {})
+      syncReactiveObject(bodyParamTypes, {})
+      primitiveParams.value = []
+      syncingFromBody = false
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => ({
+    structured: structuredBodyAvailable.value,
+    method: rpcMethod.value,
+    params: structuredBodyAvailable.value ? snapshotParams(bodyParams) : null,
+  }),
+  ({ structured, method, params }) => {
+    if (syncingFromBody) return
+    if (!structured) return
+    const rawValue = sourceDraft.rawBody?.trim()
+    let parsed
+    try {
+      parsed = rawValue ? JSON.parse(rawValue) : {}
+    } catch {
+      return
+    }
+    parsed.method = method || parsed.method || ''
+    if (params) {
+      const normalizedParams = normalizeParamValues(params)
+      parsed.params =
+        paramContainerType.value === 'object'
+          ? normalizedParams
+          : [normalizedParams]
+    }
+    syncingFromEditors = true
+    sourceDraft.rawBody = JSON.stringify(parsed, null, 2)
+    syncingFromEditors = false
+  },
+  { deep: true },
+)
+
+watch(
+  () => ({
+    method: rpcMethod.value,
+    params: [...primitiveParams.value],
+  }),
+  ({ method, params }) => {
+    if (syncingFromBody) return
+    if (!params.length) return
+    const rawValue = sourceDraft.rawBody?.trim()
+    let parsed
+    try {
+      parsed = rawValue ? JSON.parse(rawValue) : {}
+    } catch {
+      return
+    }
+    parsed.method = method || parsed.method || ''
+    parsed.params = params.map((value) => normalizePrimitiveValue(value))
+    syncingFromEditors = true
+    sourceDraft.rawBody = JSON.stringify(parsed, null, 2)
+    syncingFromEditors = false
+  },
+  { deep: true },
 )
 
 watch(
@@ -1114,22 +1512,46 @@ const showChart = computed(
   () => isPivotSource.value && chartConfig.value && vizType.value !== 'table',
 )
 
-async function run() {
-  if (isPivotSource.value) {
-    await loadPlanFields(true)
-    return
-  }
+function startCreatingSource(name = '') {
+  const normalized = name?.trim() || ''
+  isCreatingSource.value = true
+  dataSource.value = ''
+  resetSourceDraft({ name: normalized })
+  sourceSearch.value = normalized
+  pendingNewSourceName.value = ''
+  detailsVisible.value = true
+}
 
-  const { data } = await api.get('/reports/preview', {
-    params: {
-      source: dataSource.value,
-      viz: vizType.value,
-      period: filters.value.period,
-      area: filters.value.area,
-      object: filters.value.object,
+function handleSourceSearch(value = '') {
+  sourceSearch.value = value || ''
+}
+
+function toggleDetails() {
+  if (!canToggleDetails.value) return
+  detailsVisible.value = !detailsVisible.value
+}
+
+function saveCurrentSource() {
+  if (!canSaveSource.value) return
+  const payload = {
+    id: sourceDraft.id,
+    name: sourceDraft.name.trim(),
+    url: sourceDraft.url.trim(),
+    httpMethod: sourceDraft.httpMethod?.toUpperCase?.() || 'POST',
+    rawBody: sourceDraft.rawBody.trim(),
+    headers: {
+      ...(sourceDraft.headers || {}),
     },
-  })
-  result.value = data
+    supportsPivot: sourceDraft.supportsPivot !== false,
+  }
+  const id = dataSourcesStore.saveSource(payload)
+  dataSource.value = id
+  isCreatingSource.value = false
+  pendingNewSourceName.value = ''
+}
+
+async function executeCurrentSource() {
+  await loadPlanFields()
 }
 
 function saveTemplate() {
@@ -1158,44 +1580,73 @@ function saveTemplate() {
   alert(`Шаблон сохранён и доступен в списке. ID: ${id}`)
 }
 
-async function refreshPlanFields() {
-  await loadPlanFields(true)
-}
-
-async function loadPlanFields(force = false) {
-  if (!isPivotSource.value) return
+async function loadPlanFields() {
   if (planLoading.value) return
-  if (!force && planFields.value.length) return
+  const requestPayload = resolveCurrentRequestPayload()
+  if (!requestPayload) return
 
   planLoading.value = true
   planError.value = ''
   try {
-    let records = []
-    if (dataSource.value === 'plans') {
-      records = await fetchPlanRecords()
-    } else if (dataSource.value === 'parameters') {
-      records = await fetchParameterRecords()
-    }
+    const response = await sendDataSourceRequest(requestPayload)
+    result.value = response
+    const records = extractRecordsFromResponse(response)
     planRecords.value = records
-    result.value = records
     planFields.value = extractFieldDescriptors(records)
     ensureMetricExists()
+    activeResultTab.value = 'json'
   } catch (err) {
     planError.value =
       err?.response?.data?.message ||
       err?.message ||
-      'Не удалось загрузить данные плана.'
+      'Не удалось загрузить данные источника.'
     planRecords.value = []
     planFields.value = []
+    result.value = null
   } finally {
     planLoading.value = false
   }
+}
+
+function resolveCurrentRequestPayload() {
+  const url = sourceDraft.url?.trim()
+  if (!url) {
+    planError.value = 'Укажите URL источника.'
+    return null
+  }
+  const method = sourceDraft.httpMethod?.toUpperCase?.() || 'POST'
+  const headers = sourceDraft.headers || { 'Content-Type': 'application/json' }
+
+  if (method === 'GET') {
+    if (!sourceDraft.rawBody?.trim()) {
+      return { url, method, headers }
+    }
+    try {
+      return { url, method, headers, body: JSON.parse(sourceDraft.rawBody) }
+    } catch {
+      planError.value = 'Параметры GET-запроса должны быть корректным JSON.'
+      return null
+    }
+  }
+
+  if (!sourceDraft.rawBody?.trim()) {
+    planError.value = 'Добавьте тело запроса.'
+    return null
+  }
+  if (rawBodyError.value) {
+    planError.value = 'Исправьте JSON в поле Raw body.'
+    return null
+  }
+  return { url, method, headers, body: sourceDraft.rawBody }
 }
 
 function resetPlanState() {
   planRecords.value = []
   planFields.value = []
   planError.value = ''
+  result.value = null
+  activeResultTab.value = 'json'
+  primitiveParams.value = []
   replaceArray(pivotConfig.filters, [])
   replaceArray(pivotConfig.rows, [])
   replaceArray(pivotConfig.columns, [])
@@ -1213,6 +1664,16 @@ function resetFilterValues() {
   Object.keys(filterValues).forEach((key) => {
     filterValues[key] = []
   })
+}
+
+function extractRecordsFromResponse(payload) {
+  if (Array.isArray(payload)) return payload
+  if (!payload || typeof payload !== 'object') return []
+  if (Array.isArray(payload.records)) return payload.records
+  if (Array.isArray(payload.data)) return payload.data
+  if (Array.isArray(payload.result)) return payload.result
+  if (payload.result && Array.isArray(payload.result.records)) return payload.result.records
+  return []
 }
 
 function extractFieldDescriptors(records) {
@@ -1320,6 +1781,145 @@ function loadSavedConfigs() {
   } catch {
     return []
   }
+}
+
+function createBlankSource(overrides = {}) {
+  return {
+    id: overrides.id || '',
+    name: overrides.name || '',
+    url: overrides.url || '',
+    httpMethod: overrides.httpMethod?.toUpperCase?.() || 'POST',
+    rawBody: overrides.rawBody || EMPTY_BODY_TEMPLATE,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(overrides.headers || {}),
+    },
+    supportsPivot: overrides.supportsPivot !== false,
+  }
+}
+
+function resetSourceDraft(overrides = {}) {
+  Object.assign(sourceDraft, createBlankSource(overrides))
+}
+
+function loadDraftFromSource(source) {
+  if (!source) {
+    resetSourceDraft()
+    return
+  }
+  resetSourceDraft({
+    ...source,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(source.headers || {}),
+    },
+  })
+}
+
+function syncReactiveObject(target, source) {
+  Object.keys(target).forEach((key) => delete target[key])
+  Object.entries(source || {}).forEach(([key, value]) => {
+    target[key] = value
+  })
+}
+
+function formatParamsForEditors(paramsObj) {
+  return Object.entries(paramsObj || {}).reduce((acc, [key, value]) => {
+    if (value === null || typeof value === 'undefined') {
+      acc[key] = ''
+    } else if (typeof value === 'object') {
+      acc[key] = JSON.stringify(value)
+    } else {
+      acc[key] = String(value)
+    }
+    return acc
+  }, {})
+}
+
+function detectParamTypes(paramsObj) {
+  return Object.entries(paramsObj || {}).reduce((acc, [key, value]) => {
+    if (value === null) {
+      acc[key] = 'null'
+    } else if (Array.isArray(value) || typeof value === 'object') {
+      acc[key] = 'json'
+    } else {
+      acc[key] = typeof value
+    }
+    return acc
+  }, {})
+}
+
+function snapshotParams(store) {
+  return Object.entries(store || {}).reduce((acc, [key, value]) => {
+    acc[key] = value
+    return acc
+  }, {})
+}
+
+function normalizeParamValues(values) {
+  return Object.entries(values || {}).reduce((acc, [key, value]) => {
+    acc[key] = formatParamValueForBody(key, value)
+    return acc
+  }, {})
+}
+
+function formatParamValueForBody(key, value) {
+  const type = bodyParamTypes[key]
+  if (type === 'number') {
+    const num = Number(value)
+    return Number.isNaN(num) ? value : num
+  }
+  if (type === 'boolean') {
+    if (typeof value === 'boolean') return value
+    return String(value).trim() === 'true'
+  }
+  if (type === 'json') {
+    if (!value) return null
+    try {
+      return JSON.parse(value)
+    } catch {
+      return value
+    }
+  }
+  if (type === 'null') {
+    return null
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!type) {
+      if (trimmed === 'true' || trimmed === 'false') {
+        return trimmed === 'true'
+      }
+      if (!Number.isNaN(Number(trimmed)) && trimmed !== '') {
+        return Number(trimmed)
+      }
+    }
+    return value
+  }
+  return value
+}
+
+function formatPrimitiveParam(value) {
+  if (value === null || typeof value === 'undefined') return ''
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return ''
+    }
+  }
+  return String(value)
+}
+
+function normalizePrimitiveValue(value) {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed.length) return ''
+  if (trimmed === 'true') return true
+  if (trimmed === 'false') return false
+  const num = Number(trimmed)
+  if (!Number.isNaN(num)) return num
+  return value
 }
 
 function saveCurrentConfig() {
@@ -1630,10 +2230,13 @@ function flattenRowTree(nodes = [], collapsedState = {}) {
 
 <style scoped>
 .page {
-  padding: 24px;
+  padding: 32px clamp(16px, 6vw, 72px);
   display: flex;
   flex-direction: column;
   gap: 24px;
+  margin: 0 auto;
+  max-width: 1320px;
+  box-sizing: border-box;
 }
 .step {
   border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
@@ -1650,9 +2253,9 @@ function flattenRowTree(nodes = [], collapsedState = {}) {
 }
 .step__header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 20px;
 }
 .step__badge {
   width: 42px;
@@ -1688,6 +2291,130 @@ function flattenRowTree(nodes = [], collapsedState = {}) {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.source-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+@media (min-width: 900px) {
+  .source-panel {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+}
+.source-panel__selector {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.source-panel__actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  align-self: flex-start;
+  padding-top: 32px;
+}
+@media (max-width: 900px) {
+  .source-panel__actions {
+    padding-top: 4px;
+  }
+}
+.source-panel__details {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--s360-color-surface, #fff);
+}
+.source-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.combobox {
+  width: 100%;
+}
+.combobox__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--s360-text-muted, #6b7280);
+}
+.select-action {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--s360-text-primary, #1f2937);
+}
+.select-action:hover {
+  background: #f5f7fb;
+  color: var(--s360-color-primary, #2563eb);
+}
+.params-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.params-grid--compact {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 200px));
+}
+.raw-body {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  min-height: 160px;
+  resize: vertical;
+}
+.source-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.result-tabs {
+  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+}
+.tab {
+  flex: 1;
+  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--s360-text-muted, #6b7280);
+}
+.tab--active {
+  color: var(--s360-text-primary, #1f2937);
+  border-bottom: 2px solid var(--s360-color-primary, #2563eb);
+}
+.tabs__body {
+  padding: 12px;
+  max-height: 360px;
+  overflow: auto;
+}
+.tabs__body pre {
+  margin: 0;
+  font-size: 13px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+.preview-table {
+  overflow-x: auto;
 }
 .form-grid {
   display: grid;
