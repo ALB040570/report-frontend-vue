@@ -1,7 +1,9 @@
 import { defineStore } from 'pinia'
-import axios from 'axios'
 import { DEFAULT_PLAN_PAYLOAD } from '@/shared/api/plan'
 import { DEFAULT_PARAMETER_PAYLOAD } from '@/shared/api/parameter'
+import { callReportMethod } from '@/shared/api/report'
+import { fetchMethodTypeRecords } from '@/shared/api/objects'
+import { fetchCurrentUserRecord, fetchPersonnelInfo } from '@/shared/api/user'
 
 const STORAGE_KEY = 'report-data-sources'
 
@@ -72,18 +74,16 @@ function createId(prefix = 'source') {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-const METHOD_TYPE_MAP = {
-  GET: { fvMethodTyp: 1345, pvMethodTyp: 1562, nameMethodTyp: 'GET' },
-  POST: { fvMethodTyp: 1346, pvMethodTyp: 1563, nameMethodTyp: 'POST' },
-  PUT: { fvMethodTyp: 1347, pvMethodTyp: 1564, nameMethodTyp: 'PUT' },
-  PATCH: { fvMethodTyp: 1348, pvMethodTyp: 1565, nameMethodTyp: 'PATCH' },
-}
-
 export const useDataSourcesStore = defineStore('dataSources', {
   state: () => ({
     sources: loadSources(),
     loadedFromRemote: false,
     loadingRemote: false,
+    methodTypes: [],
+    methodTypesLoaded: false,
+    methodTypesLoading: false,
+    userContext: null,
+    userLoading: false,
   }),
   getters: {
     getById: (state) => (id) => state.sources.find((source) => source.id === id),
@@ -130,10 +130,7 @@ export const useDataSourcesStore = defineStore('dataSources', {
       if (this.loadingRemote || this.loadedFromRemote) return
       this.loadingRemote = true
       try {
-        const { data } = await axios.post('/dtj/api/report', {
-          method: 'report/loadReportSource',
-          params: [0],
-        })
+        const data = await callReportMethod('report/loadReportSource', [0])
         const records = extractRecords(data)
         if (!records.length) return
         const mapped = records.map((entry, index) => normalizeRemoteSource(entry, index))
@@ -148,15 +145,67 @@ export const useDataSourcesStore = defineStore('dataSources', {
         this.loadingRemote = false
       }
     },
+    async fetchMethodTypes() {
+      if (this.methodTypesLoading || this.methodTypesLoaded) return
+      this.methodTypesLoading = true
+      try {
+        const records = await fetchMethodTypeRecords()
+        if (records.length) {
+          this.methodTypes = records
+            .map(normalizeMethodTypeRecord)
+            .filter((item) => item.name && item.code)
+          this.methodTypesLoaded = this.methodTypes.length > 0
+        }
+      } catch (err) {
+        console.warn('Failed to fetch method types', err)
+      } finally {
+        this.methodTypesLoading = false
+      }
+    },
+    async fetchUserContext() {
+      if (this.userContext) return this.userContext
+      if (this._userContextPromise) {
+        await this._userContextPromise
+        return this.userContext
+      }
+      this.userLoading = true
+      this._userContextPromise = (async () => {
+        try {
+          const currentUser = await fetchCurrentUserRecord()
+          const personnelId =
+            toNumericId(currentUser?.personId) ||
+            toNumericId(currentUser?.idPerson) ||
+            toNumericId(currentUser?.objUser) ||
+            toNumericId(currentUser?.id) ||
+            null
+          let personnelInfo = null
+          if (personnelId) {
+            personnelInfo = await fetchPersonnelInfo(personnelId)
+          }
+          this.userContext = buildUserContext(currentUser, personnelInfo)
+        } catch (err) {
+          console.warn('Failed to fetch user context', err)
+          if (!this.userContext) {
+            this.userContext = null
+          }
+        } finally {
+          this.userLoading = false
+        }
+      })()
+      try {
+        await this._userContextPromise
+      } finally {
+        this._userContextPromise = null
+      }
+      return this.userContext
+    },
     async saveRemoteRecord(source) {
-      const payload = buildRemotePayload(source)
+      const userContext = await this.fetchUserContext()
+      const payload = buildRemotePayload(source, this.methodTypes, userContext)
       if (!payload) return
       const numericId = toNumericId(source.remoteMeta?.id || source.id)
       const operation = numericId ? 'upd' : 'ins'
-      const { data } = await axios.post('/dtj/api/report', {
-        method: 'report/saveReportSource',
-        params: [operation, payload],
-      })
+      const data = await callReportMethod('report/saveReportSource', [operation, payload])
       const saved = extractRecords(data)[0]
       if (saved) {
         source.remoteMeta = buildRemoteMeta(saved)
@@ -208,6 +257,18 @@ function normalizeRemoteSource(entry = {}, index = 0) {
   }
 }
 
+function normalizeMethodTypeRecord(entry = {}) {
+  const rawName = entry.name?.trim() || ''
+  const code = rawName ? rawName.toUpperCase() : ''
+  return {
+    id: entry.id ?? null,
+    pv: entry.pv ?? null,
+    factor: entry.factor ?? null,
+    name: rawName,
+    code,
+  }
+}
+
 function toRawBody(body) {
   if (!body) return ''
   if (typeof body === 'string') {
@@ -250,33 +311,38 @@ function buildRemoteMeta(entry = {}) {
   }
 }
 
-function buildRemotePayload(source) {
+function buildRemotePayload(source, methodTypes = [], userContext = null) {
   if (!source?.name) return null
   const nativeId = toNumericId(source.remoteMeta?.id || source.id)
-  const methodMeta =
-    METHOD_TYPE_MAP[source.httpMethod?.toUpperCase?.()] || METHOD_TYPE_MAP.POST || {}
   const meta = source.remoteMeta || {}
+  const methodName = source.httpMethod?.toUpperCase?.() || 'POST'
+  const methodMeta =
+    findMethodMeta(methodName, methodTypes) ||
+    {
+      fvMethodTyp: meta.fvMethodTyp,
+      pvMethodTyp: meta.pvMethodTyp,
+      nameMethodTyp: meta.nameMethodTyp || methodName,
+    }
   return {
     id: nativeId,
     cls: meta.cls,
     name: source.name,
-    Method: meta.Method || source.httpMethod?.toUpperCase?.() || 'POST',
+    Method: meta.Method || methodName,
     idMethod: meta.idMethod,
     idMethodTyp: meta.idMethodTyp,
-    fvMethodTyp: meta.fvMethodTyp || methodMeta.fvMethodTyp || 0,
-    pvMethodTyp: meta.pvMethodTyp || methodMeta.pvMethodTyp || 0,
-    nameMethodTyp:
-      meta.nameMethodTyp || methodMeta.nameMethodTyp || source.httpMethod?.toUpperCase?.(),
+    fvMethodTyp: methodMeta.fvMethodTyp || 0,
+    pvMethodTyp: methodMeta.pvMethodTyp || 0,
+    nameMethodTyp: methodMeta.nameMethodTyp || methodName,
     idMethodBody: meta.idMethodBody,
     MethodBody: source.rawBody || meta.MethodBody || '',
     idCreatedAt: meta.idCreatedAt,
     CreatedAt: meta.CreatedAt || source.createdAt || new Date().toISOString(),
     idUpdatedAt: meta.idUpdatedAt,
     UpdatedAt: new Date().toISOString(),
-    idUser: meta.idUser || 1021,
-    objUser: meta.objUser || 1003,
-    pvUser: meta.pvUser || 1087,
-    fullNameUser: meta.fullNameUser || '',
+    idUser: pickUserValue(userContext?.idUser, meta.idUser),
+    objUser: pickUserValue(userContext?.objUser, meta.objUser),
+    pvUser: pickUserValue(userContext?.pvUser, meta.pvUser),
+    fullNameUser: userContext?.fullNameUser || meta.fullNameUser || '',
     URL: source.url || meta.URL || '',
   }
 }
@@ -285,4 +351,47 @@ function toNumericId(value) {
   if (!value) return null
   const num = Number(value)
   return Number.isFinite(num) ? num : null
+}
+
+function findMethodMeta(methodName, methodTypes = []) {
+  if (!methodName) return null
+  const normalized = methodName.trim().toUpperCase()
+  if (!normalized) return null
+  const match = methodTypes.find((item) => item.code === normalized)
+  if (!match) return null
+  return {
+    fvMethodTyp: toNumericId(match.id) || 0,
+    pvMethodTyp: toNumericId(match.pv) || 0,
+    nameMethodTyp: match.name || normalized,
+  }
+}
+
+function buildUserContext(currentUser, personnelInfo) {
+  if (!currentUser && !personnelInfo) return null
+  const info = personnelInfo || {}
+  const normalizedFullName =
+    info.fullNameUser ||
+    info.fullName ||
+    [info.UserSecondName, info.UserFirstName, info.UserMiddleName]
+      .filter(Boolean)
+      .join(' ')
+  return {
+    idUser:
+      toNumericId(info.idUser) ||
+      toNumericId(currentUser?.idUser) ||
+      toNumericId(currentUser?.id),
+    objUser:
+      toNumericId(info.objUser) ||
+      toNumericId(currentUser?.objUser) ||
+      toNumericId(info.id),
+    pvUser:
+      toNumericId(info.pvUser) ||
+      toNumericId(info.pv) ||
+      toNumericId(currentUser?.pvUser),
+    fullNameUser: normalizedFullName || currentUser?.fullName || '',
+  }
+}
+
+function pickUserValue(preferred, fallback) {
+  return toNumericId(preferred) || toNumericId(fallback) || null
 }

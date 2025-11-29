@@ -12,12 +12,14 @@
             загрузите таблицу, чтобы перейти к следующему шагу.
           </p>
         </div>
-        <div
-          v-if="hasPlanData || (!isPivotSource && hasResultData)"
-          class="step__status"
-        >
-          <span class="dot dot--success"></span>
-          Данные загружены
+        <div class="step__header-actions">
+          <div
+            v-if="hasPlanData || (!isPivotSource && hasResultData)"
+            class="step__status"
+          >
+            <span class="dot dot--success"></span>
+            Данные загружены
+          </div>
         </div>
       </header>
 
@@ -308,303 +310,142 @@
           Сначала загрузите данные плана, чтобы настроить сводную таблицу.
         </p>
         <template v-else>
-          <section class="config-panel">
-            <div class="config-block">
-              <input v-model="configName" placeholder="Название конфигурации" />
-              <button
-                class="btn-success"
-                type="button"
-                @click="saveCurrentConfig"
-              >
-                Сохранить конфигурацию
-              </button>
-            </div>
-            <div class="config-block">
-              <select v-model="selectedConfigId">
-                <option value="">Выберите конфигурацию</option>
-                <option
-                  v-for="cfg in savedConfigs"
-                  :key="cfg.id"
-                  :value="cfg.id"
+          <div class="source-panel layout-panel">
+            <div class="source-panel__selector">
+              <label class="field">
+                <span class="field__label">Конфигурации</span>
+                <n-select
+                  v-model:value="selectedConfigId"
+                  :options="configOptions"
+                  placeholder="Выберите конфигурацию"
+                  :disabled="!configsReady"
+                  filterable
+                  clearable
+                  size="large"
+                  @search="handleConfigSearch"
                 >
-                  {{ cfg.name }}
-                </option>
-              </select>
-              <button
-                class="btn-outline"
-                type="button"
-                @click="loadSelectedConfig"
-                :disabled="!selectedConfigId"
-              >
-                Загрузить
-              </button>
-              <button
-                class="btn-danger"
-                type="button"
-                @click="deleteSelectedConfig"
-                :disabled="!selectedConfigId"
-              >
-                Удалить
-              </button>
-            </div>
-          </section>
-
-          <div class="pivot-layout">
-            <section class="samples">
-              <div class="step__subheader">
-                <h3>Доступные поля</h3>
-                <span class="muted">
-                  Название, ключ и примеры реальных значений из загруженной
-                  таблицы
-                </span>
-              </div>
-              <ul>
-                <li v-for="field in planFields" :key="field.key">
-                  <div class="field-main">
-                    <strong>{{ getFieldDisplayName(field) }}</strong>
-                    <span class="key-tag">{{ field.key }}</span>
-                  </div>
-                  <div class="field-meta">
-                    <span
-                      >Тип:
-                      {{ field.type === 'number' ? 'Число' : 'Текст' }}</span
+                  <template #action v-if="pendingConfigName">
+                    <div
+                      class="select-action"
+                      @mousedown.prevent
+                      @click="createConfigFromSearch"
                     >
-                    <span>
-                      Пример:
-                      <code>{{ field.sample }}</code>
-                    </span>
-                  </div>
-                  <div v-if="field.values.length" class="value-examples">
-                    <span class="meta-label">Частые значения (до 20):</span>
-                    <div class="chip-list">
-                      <span
-                        v-for="value in field.values"
-                        :key="`${field.key}-${value || 'empty'}-example`"
-                        class="chip"
-                      >
-                        {{ value || 'пусто' }}
-                      </span>
+                      Создать конфигурацию «{{ pendingConfigName }}»
                     </div>
-                  </div>
-                </li>
-              </ul>
-            </section>
-
-            <section class="pivot-grid">
-              <div
-                v-for="section in pivotSections"
-                :key="section.key"
-                class="pivot-section"
-              >
-                <div class="pivot-title">{{ section.title }}</div>
-                <div class="field-list">
-                  <label
-                    v-for="field in planFields"
-                    :key="`${section.key}-${field.key}`"
-                    class="field-option"
-                  >
-                    <input
-                      type="checkbox"
-                      :value="field.key"
-                      v-model="pivotConfig[section.key]"
-                    />
-                    <span>{{ getFieldDisplayName(field) }}</span>
-                  </label>
-                </div>
-                <div
-                  v-if="pivotConfig[section.key].length"
-                  class="selected-fields"
-                >
-                  <div
-                    v-for="(fieldKey, index) in pivotConfig[section.key]"
-                    :key="`${section.key}-selected-${fieldKey}`"
-                    class="selected-field"
-                  >
-                    <span>{{ getFieldDisplayNameByKey(fieldKey) }}</span>
-                    <div class="selected-field__actions">
-                      <button
-                        class="btn-outline btn-xs"
-                        type="button"
-                        @click="moveField(section.key, index, -1)"
-                        :disabled="index === 0"
-                      >
-                        ↑
-                      </button>
-                      <button
-                        class="btn-outline btn-xs"
-                        type="button"
-                        @click="moveField(section.key, index, 1)"
-                        :disabled="
-                          index === pivotConfig[section.key].length - 1
-                        "
-                      >
-                        ↓
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <section class="pivot-settings">
-            <label>
-              <input type="checkbox" v-model="pivotOptions.showRowTotals" />
-              Показывать итоги по строкам
-            </label>
-            <label>
-              <input type="checkbox" v-model="pivotOptions.showColumnTotals" />
-              Показывать итоги по столбцам
-            </label>
-          </section>
-
-          <section class="alias-panel" v-if="renamableFields.length">
-            <h3>Переименовать заголовки</h3>
-            <div class="alias-grid">
-              <label
-                v-for="field in renamableFields"
-                :key="`alias-${field.key}`"
-              >
-                <span>{{ field.displayLabel }}</span>
-                <input
-                  v-model="headerOverrides[field.key]"
-                  placeholder="Введите название"
-                />
+                  </template>
+                </n-select>
               </label>
+              <p class="muted">
+                Найдите макет в списке или введите название, чтобы создать
+                новый.
+              </p>
             </div>
-          </section>
-
-          <section class="metrics-panel">
-            <header>
-              <h3>Метрики сводной таблицы</h3>
-              <button class="btn-outline" type="button" @click="addMetric">
-                Добавить метрику
-              </button>
-            </header>
-            <div v-if="!pivotMetrics.length" class="muted">
-              Добавьте хотя бы одну метрику (поле + агрегат), чтобы увидеть
-              расчёты.
-            </div>
-            <div class="metrics-list">
-              <div
-                v-for="metric in pivotMetrics"
-                :key="metric.id"
-                class="metric-row"
-              >
-                <select v-model="metric.fieldKey">
-                  <option disabled value="">Поле</option>
-                  <option
-                    v-for="field in planFields"
-                    :key="`metric-${metric.id}-${field.key}`"
-                    :value="field.key"
+            <div class="source-panel__actions">
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    quaternary
+                    circle
+                    size="large"
+                    :disabled="!selectedConfigId || !configsReady"
+                    aria-label="Загрузить конфигурацию"
+                    @click="loadLayoutConfig"
                   >
-                    {{ field.label }}
-                  </option>
-                </select>
-                <select v-model="metric.aggregator">
-                  <option
-                    v-for="agg in aggregatorOptions"
-                    :key="agg.value"
-                    :value="agg.value"
-                  >
-                    {{ agg.label }}
-                  </option>
-                </select>
-                <button
-                  class="remove"
-                  type="button"
-                  @click="removeMetric(metric.id)"
-                  :disabled="pivotMetrics.length === 1"
+                    <span class="icon icon-send" />
+                  </n-button>
+                </template>
+                Загрузить конфигурацию
+              </n-tooltip>
+            <n-tooltip trigger="hover">
+              <template #trigger>
+                <n-button
+                  quaternary
+                  circle
+                  size="large"
+                  @click="toggleLayoutDetails"
+                  aria-label="Настройки макета"
                 >
-                  ×
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <div v-if="selectedFilterFields.length" class="filters-panel">
-            <h3>Значения фильтров</h3>
-            <div class="filters-panel__actions">
-              <span class="muted"
-                >Отметьте конкретные значения, чтобы сузить выборку.</span
-              >
-              <button
-                class="btn-outline btn-sm"
-                type="button"
-                @click="resetFilterValues"
-                :disabled="!hasSelectedFilterValues"
-              >
-                Сбросить значения
-              </button>
-            </div>
-            <div class="filters-grid">
-              <div
-                v-for="field in selectedFilterFields"
-                :key="field.key"
-                class="filters-field"
-              >
-                <div class="filter-title">{{ field.displayLabel }}</div>
-                <MultiSelectDropdown
-                  v-model="filterValues[field.key]"
-                  :options="fieldValueOptions(field)"
-                  placeholder="Выберите значения"
-                />
-              </div>
-            </div>
+                  <span class="icon" :class="layoutDetailsIcon" />
+                </n-button>
+              </template>
+              {{ layoutDetailsTooltip }}
+            </n-tooltip>
           </div>
+        </div>
 
           <div
-            v-if="
-              dimensionValueOptions.rows.length ||
-              dimensionValueOptions.columns.length
-            "
-            class="dimension-panel"
+            v-if="layoutDetailsVisible"
+            class="source-panel__details layout-details"
           >
-            <div
-              v-if="dimensionValueOptions.rows.length"
-              class="dimension-group"
-            >
-              <div class="dimension-title">Фильтр значений строк</div>
-              <div class="dimension-fields">
-                <div
-                  v-for="field in dimensionValueOptions.rows"
-                  :key="`row-values-${field.key}`"
-                  class="dimension-field"
-                >
-                  <div class="dimension-field__title">
-                    {{ field.displayLabel }}
-                  </div>
-                  <MultiSelectDropdown
-                    v-model="dimensionValueFilters.rows[field.key]"
-                    :options="fieldValueOptions(field)"
-                    placeholder="Выберите значения"
-                  />
-                </div>
-              </div>
+            <div class="layout-details__header">
+              <n-input
+                v-model:value="configName"
+                placeholder="Название конфигурации"
+                size="large"
+              />
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    quaternary
+                    circle
+                    size="large"
+                    @click="saveCurrentConfig"
+                    :disabled="configSaving"
+                    :loading="configSaving"
+                    aria-label="Сохранить конфигурацию"
+                  >
+                    <span class="icon icon-save" />
+                  </n-button>
+                </template>
+                Сохранить конфигурацию
+              </n-tooltip>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    quaternary
+                    circle
+                    size="large"
+                    @click="deleteSelectedConfig"
+                    :disabled="!selectedConfigId"
+                    aria-label="Удалить конфигурацию"
+                  >
+                    <span class="icon icon-trash" />
+                  </n-button>
+                </template>
+                Удалить конфигурацию
+              </n-tooltip>
             </div>
 
-            <div
-              v-if="dimensionValueOptions.columns.length"
-              class="dimension-group"
-            >
-              <div class="dimension-title">Фильтр значений столбцов</div>
-              <div class="dimension-fields">
-                <div
-                  v-for="field in dimensionValueOptions.columns"
-                  :key="`column-values-${field.key}`"
-                  class="dimension-field"
-                >
-                  <div class="dimension-field__title">
-                    {{ field.displayLabel }}
-                  </div>
-                  <MultiSelectDropdown
-                    v-model="dimensionValueFilters.columns[field.key]"
-                    :options="fieldValueOptions(field)"
-                    placeholder="Выберите значения"
-                  />
-                </div>
-              </div>
-            </div>
+            <PivotLayout
+              :fields="planFields"
+              :rows="pivotConfig.rows"
+              :columns="pivotConfig.columns"
+              :filters="pivotConfig.filters"
+              :metrics="pivotMetrics"
+              :header-overrides="headerOverrides"
+              :filter-values="filterValues"
+              :row-value-filters="dimensionValueFilters.rows"
+              :column-value-filters="dimensionValueFilters.columns"
+              :row-sorts="pivotSortState.rows"
+              :column-sorts="pivotSortState.columns"
+              :filter-sorts="pivotSortState.filters"
+              :value-options-resolver="fieldValueOptions"
+              :get-field-label="getFieldDisplayNameByKey"
+              :aggregator-options="aggregatorOptions"
+              @update:rows="updateRows"
+              @update:columns="updateColumns"
+              @update:filters="updateFilters"
+              @rename-field="handleFieldRename"
+              @update-filter-values="handleFilterValuesChange"
+              @update-row-values="handleRowValueFiltersChange"
+              @update-column-values="handleColumnValueFiltersChange"
+              @update-row-sort="handleRowSortChange"
+              @update-column-sort="handleColumnSortChange"
+              @update-filter-sort="handleFilterSortChange"
+              @add-metric="addMetric"
+              @move-metric="moveMetric"
+              @remove-metric="removeMetric"
+            />
           </div>
 
           <div v-if="pivotWarnings.length" class="warning">
@@ -621,45 +462,86 @@
             </div>
             <table>
               <thead>
-                <tr>
+                <tr v-if="metricColumnGroups.length" class="metric-header">
+                  <th
+                    :rowspan="rowHeaderRowSpan"
+                    :style="columnStyle('__rows__')"
+                    class="row-header-title"
+                  >
+                    {{ rowHeaderTitle }}
+                  </th>
+                  <th
+                    v-for="group in metricColumnGroups"
+                    :key="`metric-${group.metric.id}`"
+                    :colspan="group.span || 1"
+                    class="column-field-group"
+                  >
+                    <span class="column-field-label">Метрика</span>
+                    <span class="column-field-value">{{ group.metric.label }}</span>
+                  </th>
+                  <th
+                    v-if="hasRowTotals"
+                    :rowspan="rowHeaderRowSpan"
+                    class="column-field-group"
+                  >
+                    <span class="column-field-label">Итоги</span>
+                  </th>
+                </tr>
+                <template v-if="columnFieldRows.length">
+                  <tr
+                    v-for="(headerRow, rowIndex) in columnFieldRows"
+                    :key="`column-header-${rowIndex}`"
+                    class="column-header-row"
+                  >
+                    <template
+                      v-for="segment in headerRow.segments"
+                      :key="`segment-${rowIndex}-${segment.metricId}`"
+                    >
+                      <template
+                        v-for="(cell, cellIndex) in segment.cells"
+                        :key="`cell-${rowIndex}-${segment.metricId}-${cellIndex}`"
+                      >
+                        <th
+                          v-if="cell.isValue"
+                          :style="columnStyle(cell.styleKey)"
+                          class="column-field-group"
+                        >
+                          <span class="column-field-label">{{ headerRow.fieldLabel }}</span>
+                          <span class="column-field-value">{{ cell.label }}</span>
+                          <span
+                            class="resize-handle"
+                            @mousedown.prevent="
+                              startColumnResize(cell.styleKey, $event)
+                            "
+                          ></span>
+                        </th>
+                        <th
+                          v-else
+                          :colspan="cell.colspan"
+                          class="column-field-group"
+                        >
+                          <span class="column-field-label">{{ headerRow.fieldLabel }}</span>
+                          <span class="column-field-value">{{ cell.label }}</span>
+                        </th>
+                      </template>
+                    </template>
+                  </tr>
+                </template>
+                <tr v-else>
                   <th :style="columnStyle('__rows__')">
-                    <div class="th-content">
-                      Строки
-                      <span
-                        class="resize-handle"
-                        @mousedown.prevent="
-                          startColumnResize('__rows__', $event)
-                        "
-                      ></span>
-                    </div>
+                    {{ rowHeaderTitle }}
                   </th>
                   <th
                     v-for="column in pivotView.columns"
                     :key="column.key"
                     :style="columnStyle(column.key)"
                   >
-                    <div class="th-content">
-                      <div v-if="column.levels?.length" class="column-levels">
-                        <span
-                          v-for="(level, idx) in column.levels"
-                          :key="`${column.key}-lvl-${idx}`"
-                        >
-                          {{ level.fieldLabel }}: {{ level.value }}
-                        </span>
-                      </div>
-                      <div class="column-metric">{{ column.label }}</div>
-                      <span
-                        class="resize-handle"
-                        @mousedown.prevent="
-                          startColumnResize(column.key, $event)
-                        "
-                      ></span>
-                    </div>
+                    {{ column.label }}
                   </th>
                   <th
-                    v-for="total in pivotView.rowTotalHeaders"
+                    v-for="total in rowTotalHeaders"
                     :key="`row-total-${total.metricId}`"
-                    v-if="pivotOptions.showRowTotals"
+                    v-if="hasRowTotals"
                   >
                     {{ total.label }}
                   </th>
@@ -685,9 +567,6 @@
                         {{ isRowCollapsed(row.key) ? '+' : '−' }}
                       </button>
                       <div class="row-content">
-                        <span class="row-field" v-if="row.fieldLabel">
-                          {{ row.fieldLabel }}:
-                        </span>
                         <span>{{ row.label }}</span>
                       </div>
                     </div>
@@ -699,40 +578,42 @@
                   <td v-for="cell in row.cells" :key="cell.key" class="cell">
                     {{ cell.display }}
                   </td>
-                  <td
-                    v-for="total in row.totals"
-                    :key="`row-${row.key}-${total.metricId}`"
-                    class="total"
-                    v-if="pivotOptions.showRowTotals"
-                  >
-                    {{ total.display }}
-                  </td>
+                  <template v-if="hasRowTotals">
+                    <td
+                      v-for="total in filteredRowTotals(row)"
+                      :key="`row-${row.key}-${total.metricId}`"
+                      class="total"
+                    >
+                      {{ total.display }}
+                    </td>
+                  </template>
                 </tr>
               </tbody>
-              <tfoot
-                v-if="
-                  pivotOptions.showColumnTotals || pivotOptions.showRowTotals
-                "
-              >
+              <tfoot v-if="hasColumnTotals || hasRowTotals">
                 <tr>
-                  <td v-if="pivotOptions.showColumnTotals">
-                    Итого по столбцам
+                  <td class="total-label">
+                    {{ hasColumnTotals ? 'Итого по столбцам' : 'Итоги' }}
                   </td>
                   <td
                     v-for="column in pivotView.columns"
                     :key="`total-${column.key}`"
                     class="total"
-                    v-if="pivotOptions.showColumnTotals"
                   >
-                    {{ column.totalDisplay }}
+                    <template v-if="hasColumnTotals">
+                      {{
+                        shouldShowColumnTotal(column.metricId)
+                          ? column.totalDisplay
+                          : '—'
+                      }}
+                    </template>
                   </td>
                   <td
-                    v-for="total in pivotView.rowTotalHeaders"
+                    v-for="total in rowTotalHeaders"
                     :key="`grand-${total.metricId}`"
                     class="grand-total"
-                    v-if="pivotOptions.showRowTotals"
+                    v-if="hasRowTotals"
                   >
-                    {{ pivotView.grandTotals[total.metricId] }}
+                    {{ formatGrandTotal(total.metricId) }}
                   </td>
                 </tr>
               </tfoot>
@@ -902,8 +783,17 @@
 import { computed, reactive, ref, watch, onMounted } from 'vue'
 import { NButton, NTooltip, NSelect, NInput, NModal } from 'naive-ui'
 import ReportChart from '@/components/ReportChart.vue'
-import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
+import PivotLayout from '@/components/PivotLayout.vue'
 import { sendDataSourceRequest } from '@/shared/api/dataSource'
+import {
+  loadReportConfigurations,
+  saveReportConfiguration,
+  saveComplexMetric,
+  deleteComplexEntity,
+  REMOTE_AGGREGATORS,
+  ROW_TOTAL_META,
+  COLUMN_TOTAL_META,
+} from '@/shared/api/report'
 import { useDataSourcesStore } from '@/shared/stores/dataSources'
 import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
@@ -932,7 +822,7 @@ const EMPTY_BODY_TEMPLATE = JSON.stringify(
   null,
   2,
 )
-const HTTP_METHODS = ['POST', 'GET', 'PUT', 'PATCH']
+const HTTP_METHOD_FALLBACKS = ['POST', 'GET', 'PUT', 'PATCH']
 const sourceDraft = reactive(createBlankSource())
 const rawBodyError = ref('')
 const structuredBodyAvailable = ref(false)
@@ -949,6 +839,8 @@ const dictionarySearch = ref('')
 
 onMounted(() => {
   dataSourcesStore.fetchRemoteSources()
+  dataSourcesStore.fetchMethodTypes()
+  dataSourcesStore.fetchUserContext()
 })
 
 const planRecords = ref([])
@@ -1076,10 +968,29 @@ const dictionaryGroups = computed(() => {
     items,
   }))
 })
-const httpMethodOptions = HTTP_METHODS.map((method) => ({
-  label: method,
-  value: method,
-}))
+const httpMethodOptions = computed(() => {
+  const remoteTypes = dataSourcesStore.methodTypes || []
+  if (remoteTypes.length) {
+    const options = remoteTypes
+      .map((type) => ({
+        label: type.name || type.code,
+        value: type.code || type.name?.toUpperCase?.(),
+      }))
+      .filter((option) => option.value)
+    const currentValue = sourceDraft.httpMethod
+    if (
+      currentValue &&
+      !options.find((option) => option.value === currentValue)
+    ) {
+      options.unshift({ label: currentValue, value: currentValue })
+    }
+    return options
+  }
+  return HTTP_METHOD_FALLBACKS.map((method) => ({
+    label: method,
+    value: method,
+  }))
+})
 const formattedResultJson = computed(() => {
   if (!hasResultData.value) return ''
   try {
@@ -1106,12 +1017,6 @@ const previewColumns = computed(() => {
 })
 const previewRows = computed(() => planRecords.value.slice(0, 100))
 
-const pivotSections = [
-  { key: 'filters', title: 'Фильтры' },
-  { key: 'rows', title: 'Строки' },
-  { key: 'columns', title: 'Столбцы' },
-]
-
 const pivotConfig = reactive({
   filters: [],
   rows: [],
@@ -1125,9 +1030,10 @@ const dimensionValueFilters = reactive({
   rows: {},
   columns: {},
 })
-const pivotOptions = reactive({
-  showRowTotals: true,
-  showColumnTotals: true,
+const pivotSortState = reactive({
+  rows: {},
+  columns: {},
+  filters: {},
 })
 const headerOverrides = reactive({})
 const columnWidths = reactive({})
@@ -1154,21 +1060,38 @@ const aggregatorOptions = [
   { value: 'sum', label: 'Сумма' },
   { value: 'avg', label: 'Среднее' },
 ]
-const supportedChartTypes = ['bar', 'line', 'pie']
-const chartPalette = [
-  '#2b6cb0',
-  '#f97316',
-  '#0ea5e9',
-  '#10b981',
-  '#ef4444',
-  '#8b5cf6',
-]
-
-const CONFIG_STORAGE_KEY = 'report-pivot-configs'
-const savedConfigs = ref(loadSavedConfigs())
+const reportConfigs = ref([])
+const configsLoading = ref(false)
+const configsReady = ref(false)
+const configSaving = ref(false)
 const selectedConfigId = ref('')
 const configName = ref('')
+const layoutDetailsVisible = ref(false)
+const configSearch = ref('')
+const pendingConfigName = ref('')
+const currentConfigMeta = ref(null)
 const pageBuilderStore = usePageBuilderStore()
+
+const currentSourceParentId = computed(() => {
+  const remoteId = selectedSource.value?.remoteMeta?.id
+  const fallback = selectedSource.value?.id
+  const numericId = Number(remoteId || fallback)
+  return Number.isFinite(numericId) ? numericId : null
+})
+
+const filteredConfigs = computed(() => {
+  if (!configsReady.value) return []
+  const parentId = currentSourceParentId.value
+  if (!parentId) return []
+  return reportConfigs.value.filter((cfg) => cfg.parent === parentId)
+})
+
+const configOptions = computed(() =>
+  filteredConfigs.value.map((cfg) => ({
+    label: cfg.name,
+    value: cfg.id,
+  })),
+)
 
 watch(
   dataSources,
@@ -1206,6 +1129,31 @@ watch(
   },
   { immediate: true },
 )
+
+watch(
+  () => selectedConfigId.value,
+  (id) => {
+    if (!id) {
+      configName.value = ''
+      currentConfigMeta.value = null
+      return
+    }
+    const entry = reportConfigs.value.find((cfg) => cfg.id === id)
+    if (entry) {
+      configName.value = entry.name || ''
+      currentConfigMeta.value = entry.remoteMeta || null
+    }
+  },
+)
+const supportedChartTypes = ['bar', 'line', 'pie']
+const chartPalette = [
+  '#2b6cb0',
+  '#f97316',
+  '#0ea5e9',
+  '#10b981',
+  '#ef4444',
+  '#8b5cf6',
+]
 
 watch(
   () => sourceSearch.value,
@@ -1379,10 +1327,11 @@ watch(
 watch(
   () => planFields.value.map((field) => field.key),
   (validKeys) => {
-    pivotSections.forEach((section) => {
-      pivotConfig[section.key] = pivotConfig[section.key].filter((key) =>
+    ;['filters', 'rows', 'columns'].forEach((section) => {
+      pivotConfig[section] = pivotConfig[section].filter((key) =>
         validKeys.includes(key),
       )
+      syncSortStore(pivotSortState[section], pivotConfig[section])
     })
     pivotMetrics.forEach((metric) => {
       if (metric.fieldKey && !validKeys.includes(metric.fieldKey)) {
@@ -1404,6 +1353,7 @@ watch(
         delete filterValues[key]
       }
     })
+    syncSortStore(pivotSortState.filters, next)
   },
   { deep: true },
 )
@@ -1421,10 +1371,19 @@ function syncDimensionFilters(type, keys) {
   })
 }
 
+function syncSortStore(store, keys) {
+  Object.keys(store).forEach((key) => {
+    if (!keys.includes(key)) {
+      delete store[key]
+    }
+  })
+}
+
 watch(
   () => [...pivotConfig.rows],
   (keys) => {
     syncDimensionFilters('rows', keys)
+    syncSortStore(pivotSortState.rows, keys)
     resetRowCollapse()
   },
   { deep: true },
@@ -1434,6 +1393,7 @@ watch(
   () => [...pivotConfig.columns],
   (keys) => {
     syncDimensionFilters('columns', keys)
+    syncSortStore(pivotSortState.columns, keys)
   },
   { deep: true },
 )
@@ -1482,14 +1442,6 @@ watch(
 )
 
 watch(
-  () => savedConfigs.value,
-  (configs) => {
-    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(configs))
-  },
-  { deep: true },
-)
-
-watch(
   pivotMetrics,
   () => {
     pivotMetricsVersion.value += 1
@@ -1504,62 +1456,20 @@ const planFieldsMap = computed(() => {
   }, new Map())
 })
 
-const selectedFilterFields = computed(() =>
-  pivotConfig.filters
-    .map((key) => {
-      const field = planFieldsMap.value.get(key)
-      if (!field) return null
-      return {
-        ...field,
-        displayLabel: getFieldDisplayNameByKey(key),
-      }
-    })
-    .filter(Boolean),
-)
-
-const dimensionValueOptions = computed(() => {
-  const mapField = (key) => {
-    const field = planFieldsMap.value.get(key)
-    if (!field) return null
-    return {
-      ...field,
-      displayLabel: getFieldDisplayNameByKey(key),
-    }
-  }
-  return {
-    rows: pivotConfig.rows.map((key) => mapField(key)).filter(Boolean),
-    columns: pivotConfig.columns.map((key) => mapField(key)).filter(Boolean),
-  }
-})
-
-const renamableFields = computed(() => {
-  const keys = new Set([
-    ...pivotConfig.rows,
-    ...pivotConfig.columns,
-    ...pivotConfig.filters,
-    ...pivotMetrics.map((metric) => metric.fieldKey).filter(Boolean),
-  ])
-  return [...keys]
-    .map((key) => {
-      const field = planFieldsMap.value.get(key)
-      if (!field) return null
-      return {
-        ...field,
-        displayLabel: getFieldDisplayNameByKey(key),
-      }
-    })
-    .filter(Boolean)
-})
 
 const activeMetrics = computed(() => {
   pivotMetricsVersion.value
   return pivotMetrics
+    .filter((metric) => metric.enabled !== false)
     .map((metric) => {
       const field = planFieldsMap.value.get(metric.fieldKey)
       if (!field || !metric.fieldKey) return null
+      const baseLabel = metric.title?.trim()
+        ? metric.title.trim()
+        : aggregatorLabel(metric.aggregator, field)
       return {
         ...metric,
-        label: aggregatorLabel(metric.aggregator, field),
+        label: baseLabel,
         field,
       }
     })
@@ -1643,6 +1553,92 @@ const canUseVizSettings = computed(() =>
 const hasSelectedFilterValues = computed(() =>
   Object.values(filterValues).some((values) => values && values.length),
 )
+const rowHeaderTitle = computed(() => {
+  if (!pivotConfig.rows.length) return 'Строки'
+  return pivotConfig.rows
+    .map((key) => getFieldDisplayNameByKey(key))
+    .join(' › ')
+})
+const columnHeaderRows = computed(() => {
+  const view = pivotView.value
+  if (!view) return []
+  const columns = view.columns || []
+  if (!columns.length) return []
+  const columnFields = pivotConfig.columns
+  if (!columnFields.length) return []
+  return columnFields.map((fieldKey, levelIndex) => {
+    const label = getFieldDisplayNameByKey(fieldKey)
+    const isValue = levelIndex === columnFields.length - 1
+    const cells = isValue
+      ? columns.map((column) => ({
+          label: getColumnLevelValue(column, levelIndex),
+          colspan: 1,
+          styleKey: column.key,
+          isValue: true,
+        }))
+      : groupColumnsByLevel(columns, levelIndex).map((cell) => ({
+          ...cell,
+          isValue: false,
+        }))
+    return {
+      label,
+      cells,
+      isValue,
+    }
+  })
+})
+const metricColumnGroups = computed(() => {
+  const view = pivotView.value
+  if (!view) return []
+  const columns = view.columns || []
+  if (!columns.length) return []
+  return activeMetrics.value.map((metric) => {
+    const entries = columns.filter((column) => column.metricId === metric.id)
+    return {
+      metric,
+      entries,
+      span: entries.length || 1,
+    }
+  })
+})
+const columnFieldRows = computed(() => {
+  const groups = metricColumnGroups.value
+  const columnFields = pivotConfig.columns
+  if (!groups.length || !columnFields.length) return []
+  return columnFields.map((fieldKey, levelIndex) => {
+    const fieldLabel = getFieldDisplayNameByKey(fieldKey)
+    const isValue = levelIndex === columnFields.length - 1
+    const segments = groups.map((group) => {
+      const entries = group.entries
+      const cells = isValue
+        ? entries.map((column) => ({
+            label: getColumnLevelValue(column, levelIndex),
+            colspan: 1,
+            styleKey: column.key,
+            isValue: true,
+          }))
+        : groupColumnsByLevel(entries, levelIndex).map((cell) => ({
+            label: cell.label,
+            colspan: cell.colspan,
+            isValue: false,
+          }))
+      return { metricId: group.metric.id, cells }
+    })
+    return { fieldLabel, segments }
+  })
+})
+const rowHeaderRowSpan = computed(() => {
+  const metricRows = metricColumnGroups.value.length ? 1 : 0
+  const fieldRows = columnFieldRows.value.length
+  const total = metricRows + fieldRows
+  return total || 1
+})
+const layoutDetailsIcon = computed(() =>
+  layoutDetailsVisible.value ? 'icon-close' : 'icon-gear',
+)
+const layoutDetailsTooltip = computed(() =>
+  layoutDetailsVisible.value ? 'Скрыть детали' : 'Детали конфигурации',
+)
 const tableRows = computed(() => {
   const view = pivotView.value
   if (!view) return []
@@ -1659,6 +1655,43 @@ const tableRows = computed(() => {
     totals: row.totals,
   }))
 })
+
+const rowTotalMetricIds = computed(() =>
+  activeMetrics.value
+    .filter((metric) => metric.showRowTotals)
+    .map((metric) => metric.id),
+)
+const columnTotalMetricIds = computed(() =>
+  activeMetrics.value
+    .filter((metric) => metric.showColumnTotals)
+    .map((metric) => metric.id),
+)
+const rowTotalMetricSet = computed(
+  () => new Set(rowTotalMetricIds.value),
+)
+const columnTotalMetricSet = computed(
+  () => new Set(columnTotalMetricIds.value),
+)
+const hasRowTotals = computed(() => rowTotalMetricIds.value.length > 0)
+const hasColumnTotals = computed(() => columnTotalMetricIds.value.length > 0)
+const rowTotalHeaders = computed(() => {
+  const view = pivotView.value
+  if (!view) return []
+  const allowed = rowTotalMetricSet.value
+  return view.rowTotalHeaders.filter((header) => allowed.has(header.metricId))
+})
+
+function filteredRowTotals(row) {
+  const allowed = rowTotalMetricSet.value
+  return row.totals.filter((total) => allowed.has(total.metricId))
+}
+function shouldShowColumnTotal(metricId) {
+  return columnTotalMetricSet.value.has(metricId)
+}
+function formatGrandTotal(metricId) {
+  const map = pivotView.value?.grandTotals || {}
+  return map[metricId] ?? '—'
+}
 
 function columnWidthStyle(key) {
   const baseWidth = key === '__rows__' ? 200 : defaultColumnWidth
@@ -1703,14 +1736,6 @@ function startRowResize(key, event) {
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
 }
-function moveField(sectionKey, index, delta) {
-  const list = pivotConfig[sectionKey]
-  if (!list) return
-  const nextIndex = index + delta
-  if (nextIndex < 0 || nextIndex >= list.length) return
-  const [item] = list.splice(index, 1)
-  list.splice(nextIndex, 0, item)
-}
 function columnStyle(columnKey) {
   return { width: columnWidthStyle(columnKey) }
 }
@@ -1745,8 +1770,8 @@ const chartConfig = computed(() => {
     })
   }
 
-  if (!datasets.length && view.rowTotalHeaders.length) {
-    datasets = view.rowTotalHeaders.map((header, index) => {
+  if (!datasets.length && rowTotalHeaders.value.length) {
+    datasets = rowTotalHeaders.value.map((header, index) => {
       const color = chartPalette[index % chartPalette.length]
       const data = view.rows.map((row) => {
         const total = row.totals.find(
@@ -1858,7 +1883,9 @@ async function saveCurrentSource() {
     isCreatingSource.value = false
     pendingNewSourceName.value = ''
   } catch (err) {
-    alert('Не удалось сохранить источник. Проверьте соединение или попробуйте позже.')
+    alert(
+      'Не удалось сохранить источник. Проверьте соединение или попробуйте позже.',
+    )
   }
 }
 
@@ -1900,6 +1927,7 @@ async function loadPlanFields() {
   const requestPayload = resolveCurrentRequestPayload()
   if (!requestPayload) return
 
+  configsReady.value = false
   planLoading.value = true
   planError.value = ''
   try {
@@ -1910,6 +1938,12 @@ async function loadPlanFields() {
     planFields.value = extractFieldDescriptors(records)
     ensureMetricExists()
     activeResultTab.value = 'preview'
+    if (isPivotSource.value) {
+      await fetchReportConfigs(currentSourceParentId.value)
+    } else {
+      configsReady.value = false
+      reportConfigs.value = []
+    }
   } catch (err) {
     planError.value =
       err?.response?.data?.message ||
@@ -1973,6 +2007,7 @@ function resetPlanState() {
   result.value = null
   activeResultTab.value = 'preview'
   primitiveParams.value = []
+  layoutDetailsVisible.value = false
   replaceArray(pivotConfig.filters, [])
   replaceArray(pivotConfig.rows, [])
   replaceArray(pivotConfig.columns, [])
@@ -1988,6 +2023,13 @@ function resetPlanState() {
   Object.keys(columnWidths).forEach((key) => delete columnWidths[key])
   Object.keys(rowHeights).forEach((key) => delete rowHeights[key])
   resetRowCollapse()
+  configsReady.value = false
+  reportConfigs.value = []
+  selectedConfigId.value = ''
+  configName.value = ''
+  pendingConfigName.value = ''
+  configSearch.value = ''
+  currentConfigMeta.value = null
 }
 
 function resetFilterValues() {
@@ -2088,9 +2130,14 @@ let metricCounter = 0
 function createMetric(overrides = {}) {
   metricCounter += 1
   return {
-    id: `metric-${metricCounter}`,
+    id: overrides.id || `metric-${metricCounter}`,
     fieldKey: overrides.fieldKey || '',
     aggregator: overrides.aggregator || 'count',
+    title: overrides.title || '',
+    enabled: overrides.enabled !== false,
+    showRowTotals: overrides.showRowTotals !== false,
+    showColumnTotals: overrides.showColumnTotals !== false,
+    remoteMeta: overrides.remoteMeta || null,
   }
 }
 
@@ -2105,16 +2152,6 @@ function removeMetric(metricId) {
   if (index >= 0) {
     pivotMetrics.splice(index, 1)
     pivotMetricsVersion.value += 1
-  }
-}
-
-function loadSavedConfigs() {
-  try {
-    const raw = localStorage.getItem(CONFIG_STORAGE_KEY)
-    if (!raw) return []
-    return JSON.parse(raw)
-  } catch {
-    return []
   }
 }
 
@@ -2257,7 +2294,328 @@ function normalizePrimitiveValue(value) {
   return value
 }
 
-function saveCurrentConfig() {
+async function fetchReportConfigs(parentId = null) {
+  const numericParent = Number(parentId)
+  const hasValidParent = Number.isFinite(numericParent)
+  configsLoading.value = true
+  configsReady.value = false
+  try {
+    if (!hasValidParent) {
+      reportConfigs.value = []
+      return
+    }
+    const records = await loadReportConfigurations()
+    const normalized = records.map((entry) => normalizeRemoteConfig(entry))
+    if (currentSourceParentId.value !== numericParent) {
+      return
+    }
+    reportConfigs.value = normalized.filter((cfg) => cfg.parent === numericParent)
+    configsReady.value = true
+  } catch (err) {
+    console.warn('Failed to load report configurations', err)
+    reportConfigs.value = []
+  } finally {
+    configsLoading.value = false
+    if (!hasValidParent) configsReady.value = false
+  }
+}
+
+function normalizeRemoteConfig(entry = {}) {
+  const filterPayload = parseMetaPayload(entry.FilterVal)
+  const rowPayload = parseMetaPayload(entry.RowVal)
+  const colPayload = parseMetaPayload(entry.ColVal)
+  const rawParent =
+    entry.parent ?? entry.parentId ?? entry.parent_id ?? entry.Parent
+  const parentValue = Number(rawParent)
+  const parent = Number.isFinite(parentValue) ? parentValue : null
+  const metrics =
+    (entry.complex || []).map((item) =>
+      normalizeRemoteMetric(item, filterPayload.metricSettings || []),
+    ) || []
+  return {
+    id: entry.id ? String(entry.id) : createId(),
+    name: entry.name || `Конфигурация ${entry.id || ''}`,
+    parent,
+    remoteMeta: entry,
+    pivot: {
+      filters: parseFieldSequence(entry.Filter),
+      rows: parseFieldSequence(entry.Row),
+      columns: parseFieldSequence(entry.Col),
+    },
+    headerOverrides: filterPayload.headerOverrides || {},
+    filterValues: filterPayload.values || {},
+    rowFilters: rowPayload.values || {},
+    columnFilters: colPayload.values || {},
+    sorts: {
+      filters: filterPayload.sorts || {},
+      rows: rowPayload.sorts || {},
+      columns: colPayload.sorts || {},
+    },
+    metrics,
+  }
+}
+
+function parseFieldSequence(value) {
+  if (!value) return []
+  if (Array.isArray(value)) return value.filter(Boolean)
+  const trimmed = String(value).trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    if (Array.isArray(parsed)) return parsed.filter(Boolean)
+  } catch {
+    // ignore
+  }
+  return trimmed
+    .split(/[.,|;]/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+}
+
+function encodeFieldSequence(list = []) {
+  return list.filter(Boolean).join('.')
+}
+
+function parseMetaPayload(value) {
+  if (!value) return { values: {} }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      if (parsed && typeof parsed === 'object') return parsed
+    } catch {
+      return { values: {} }
+    }
+  }
+  return { values: {} }
+}
+
+function encodeFilterPayload() {
+  return JSON.stringify({
+    values: copyFilterStore(filterValues),
+    headerOverrides: { ...headerOverrides },
+    sorts: cloneSortState(pivotSortState.filters),
+    metricSettings: pivotMetrics.map((metric) => ({
+      id: metric.id,
+      title: metric.title || '',
+      enabled: metric.enabled !== false,
+      showRowTotals: metric.showRowTotals !== false,
+      showColumnTotals: metric.showColumnTotals !== false,
+      aggregator: metric.aggregator,
+      remoteId: metric.remoteMeta?.idMetricsComplex,
+      fieldKey: metric.fieldKey,
+    })),
+  })
+}
+
+function encodeDimensionPayload(store, sortStore) {
+  return JSON.stringify({
+    values: copyFilterStore(store),
+    sorts: cloneSortState(sortStore),
+  })
+}
+
+function cloneSortState(store = {}) {
+  return Object.entries(store).reduce((acc, [key, value]) => {
+    acc[key] = {
+      value: value?.value || 'none',
+      metric: value?.metric || 'none',
+    }
+    return acc
+  }, {})
+}
+
+function normalizeRemoteMetric(entry = {}, metricSettings = []) {
+  const aggregatorKey =
+    Object.entries(REMOTE_AGGREGATORS).find(
+      ([, meta]) =>
+        meta.fvFieldVal === entry.fvFieldVal && meta.pvFieldVal === entry.pvFieldVal,
+    )?.[0] || 'sum'
+  const saved = metricSettings.find(
+    (item) =>
+      item.remoteId === entry.idMetricsComplex ||
+      item.fieldKey === entry.FieldName,
+  )
+  return createMetric({
+    id: entry.idMetricsComplex ? String(entry.idMetricsComplex) : undefined,
+    fieldKey: entry.FieldName || '',
+    aggregator: saved?.aggregator || aggregatorKey,
+    title: saved?.title || '',
+    enabled: saved?.enabled !== false,
+    showRowTotals: saved?.showRowTotals !== false,
+    showColumnTotals: saved?.showColumnTotals !== false,
+    remoteMeta: {
+      idMetricsComplex: entry.idMetricsComplex,
+      idFieldVal: entry.idFieldVal,
+      idFieldName: entry.idFieldName,
+      fvFieldVal: entry.fvFieldVal,
+      pvFieldVal: entry.pvFieldVal,
+    },
+  })
+}
+
+function handleConfigSearch(value = '') {
+  configSearch.value = value || ''
+  const trimmed = configSearch.value.trim()
+  if (!configsReady.value) {
+    pendingConfigName.value = ''
+    return
+  }
+  if (!trimmed) {
+    pendingConfigName.value = ''
+    return
+  }
+  const exists = filteredConfigs.value.some(
+    (cfg) => cfg.name?.toLowerCase() === trimmed.toLowerCase(),
+  )
+  pendingConfigName.value = exists ? '' : trimmed
+}
+
+function createConfigFromSearch() {
+  if (!pendingConfigName.value.trim()) return
+  configName.value = pendingConfigName.value.trim()
+  selectedConfigId.value = ''
+  pendingConfigName.value = ''
+  currentConfigMeta.value = null
+  layoutDetailsVisible.value = true
+}
+
+function toggleLayoutDetails() {
+  layoutDetailsVisible.value = !layoutDetailsVisible.value
+  if (layoutDetailsVisible.value && selectedConfigId.value) {
+    const entry = reportConfigs.value.find(
+      (cfg) => cfg.id === selectedConfigId.value,
+    )
+    if (entry) {
+      configName.value = entry.name || ''
+    }
+  }
+}
+
+function loadLayoutConfig() {
+  if (!selectedConfigId.value) return
+  const entry = reportConfigs.value.find(
+    (cfg) => cfg.id === selectedConfigId.value,
+  )
+  if (entry) {
+    configName.value = entry.name || ''
+    applyConfigRecord(entry)
+    layoutDetailsVisible.value = true
+  }
+}
+
+function applyConfigRecord(record) {
+  const pivot = record.pivot || {}
+  replaceArray(pivotConfig.filters, pivot.filters || [])
+  replaceArray(pivotConfig.rows, pivot.rows || [])
+  replaceArray(pivotConfig.columns, pivot.columns || [])
+
+  pivotMetrics.splice(0, pivotMetrics.length, ...(record.metrics || []))
+  pivotMetricsVersion.value += 1
+  if (!pivotMetrics.length) ensureMetricExists()
+
+  Object.keys(filterValues).forEach((key) => delete filterValues[key])
+  Object.entries(record.filterValues || {}).forEach(([key, values]) => {
+    filterValues[key] = [...values]
+  })
+  applyFilterSnapshot(
+    dimensionValueFilters.rows,
+    pivotConfig.rows,
+    record.rowFilters || {},
+  )
+  applyFilterSnapshot(
+    dimensionValueFilters.columns,
+    pivotConfig.columns,
+    record.columnFilters || {},
+  )
+  applySortSnapshot(pivotSortState.filters, record.sorts?.filters || {})
+  applySortSnapshot(pivotSortState.rows, record.sorts?.rows || {})
+  applySortSnapshot(pivotSortState.columns, record.sorts?.columns || {})
+
+  Object.keys(headerOverrides).forEach((key) => delete headerOverrides[key])
+  Object.entries(record.headerOverrides || {}).forEach(([key, value]) => {
+    headerOverrides[key] = value
+  })
+
+  currentConfigMeta.value = record.remoteMeta || null
+}
+
+function applySortSnapshot(target, snapshot = {}) {
+  Object.keys(target).forEach((key) => delete target[key])
+  Object.entries(snapshot).forEach(([key, value]) => {
+    target[key] = {
+      value: value?.value || 'none',
+      metric: value?.metric || 'none',
+    }
+  })
+}
+
+function updateRows(next = []) {
+  replaceArray(pivotConfig.rows, next || [])
+}
+
+function updateColumns(next = []) {
+  replaceArray(pivotConfig.columns, next || [])
+}
+
+function updateFilters(next = []) {
+  replaceArray(pivotConfig.filters, next || [])
+}
+
+function handleFieldRename({ key, title }) {
+  if (!key) return
+  if (!title || !title.trim()) {
+    delete headerOverrides[key]
+    return
+  }
+  headerOverrides[key] = title.trim()
+}
+
+function handleFilterValuesChange({ key, values }) {
+  if (!key) return
+  filterValues[key] = [...(values || [])]
+}
+
+function handleRowValueFiltersChange({ key, values }) {
+  if (!key) return
+  dimensionValueFilters.rows[key] = [...(values || [])]
+}
+
+function handleColumnValueFiltersChange({ key, values }) {
+  if (!key) return
+  dimensionValueFilters.columns[key] = [...(values || [])]
+}
+
+function handleRowSortChange(payload) {
+  updateSortState(pivotSortState.rows, payload)
+}
+
+function handleColumnSortChange(payload) {
+  updateSortState(pivotSortState.columns, payload)
+}
+
+function handleFilterSortChange(payload) {
+  updateSortState(pivotSortState.filters, payload)
+}
+
+function updateSortState(store, { key, kind, direction }) {
+  if (!key || !kind) return
+  if (!store[key]) {
+    store[key] = { value: 'none', metric: 'none' }
+  }
+  store[key][kind] = direction || 'none'
+}
+
+function moveMetric({ index, delta }) {
+  const next = index + delta
+  if (next < 0 || next >= pivotMetrics.length) return
+  const copy = [...pivotMetrics]
+  const [moved] = copy.splice(index, 1)
+  copy.splice(next, 0, moved)
+  pivotMetrics.splice(0, pivotMetrics.length, ...copy)
+  pivotMetricsVersion.value += 1
+}
+
+async function saveCurrentConfig() {
   if (!configName.value.trim()) {
     alert('Укажите название конфигурации')
     return
@@ -2266,23 +2624,152 @@ function saveCurrentConfig() {
     alert('Добавьте хотя бы одну метрику')
     return
   }
-  const payload = snapshotCurrentConfig()
-  const normalizedName = configName.value.trim()
-  const existingIndex = savedConfigs.value.findIndex(
-    (cfg) => cfg.name === normalizedName,
+  const parentId = getCurrentParentId()
+  if (!parentId) {
+    alert('Не выбран удалённый источник данных для конфигурации')
+    return
+  }
+  const payload = buildConfigPayload(parentId)
+  const previousMeta = currentConfigMeta.value
+  const operation = currentConfigMeta.value?.id ? 'upd' : 'ins'
+  configSaving.value = true
+  try {
+    const saved = await saveReportConfiguration(operation, payload)
+    const savedId = saved?.id || previousMeta?.id
+    if (saved) {
+      currentConfigMeta.value = saved
+    } else if (previousMeta) {
+      currentConfigMeta.value = { ...previousMeta, ...payload }
+    } else {
+      currentConfigMeta.value = payload
+    }
+    const previousMetricIds = new Set(
+      (previousMeta?.complex || []).map((item) => Number(item.idMetricsComplex)),
+    )
+    const currentRemoteIds = new Set(
+      pivotMetrics
+        .map((metric) => Number(metric.remoteMeta?.idMetricsComplex))
+        .filter(Boolean),
+    )
+    for (const oldId of previousMetricIds) {
+      if (oldId && !currentRemoteIds.has(oldId)) {
+        await deleteComplexEntity(oldId)
+      }
+    }
+    const configRemoteId = Number(savedId)
+    for (const metric of pivotMetrics) {
+      const metricPayload = buildMetricPayload(metric, configRemoteId)
+      const metricOperation = metric.remoteMeta?.idMetricsComplex ? 'upd' : 'ins'
+      await saveComplexMetric(metricOperation, metricPayload)
+    }
+    await fetchReportConfigs(getCurrentParentId())
+    if (configRemoteId) {
+      const refreshed = reportConfigs.value.find(
+        (cfg) => Number(cfg.remoteMeta?.id) === configRemoteId,
+      )
+      if (refreshed) {
+        selectedConfigId.value = refreshed.id
+        applyConfigRecord(refreshed)
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to save configuration', err)
+  } finally {
+    configSaving.value = false
+  }
+}
+
+function buildConfigPayload(parentId) {
+  const remoteMeta = currentConfigMeta.value || {}
+  return {
+    ...remoteMeta,
+    parent: parentId,
+    name: configName.value.trim(),
+    Filter: encodeFieldSequence(pivotConfig.filters),
+    Row: encodeFieldSequence(pivotConfig.rows),
+    Col: encodeFieldSequence(pivotConfig.columns),
+    FilterVal: encodeFilterPayload(),
+    RowVal: encodeDimensionPayload(
+      dimensionValueFilters.rows,
+      pivotSortState.rows,
+    ),
+    ColVal: encodeDimensionPayload(
+      dimensionValueFilters.columns,
+      pivotSortState.columns,
+    ),
+    fvRowTotal: ROW_TOTAL_META.fv,
+    pvRowTotal: ROW_TOTAL_META.pv,
+    fvColTotal: COLUMN_TOTAL_META.fv,
+    pvColTotal: COLUMN_TOTAL_META.pv,
+    nameRowTotal: hasRowTotals.value ? 'да' : 'нет',
+    nameColTotal: hasColumnTotals.value ? 'да' : 'нет',
+    CreatedAt: remoteMeta.CreatedAt || new Date().toISOString(),
+    UpdatedAt: new Date().toISOString(),
+    objUser: remoteMeta.objUser || 1003,
+    pvUser: remoteMeta.pvUser || 1087,
+  }
+}
+
+function buildMetricPayload(metric, configId) {
+  const aggregatorMeta =
+    REMOTE_AGGREGATORS[metric.aggregator] || REMOTE_AGGREGATORS.sum
+  return {
+    id: Number(configId),
+    idMetricsComplex: metric.remoteMeta?.idMetricsComplex,
+    idFieldVal: metric.remoteMeta?.idFieldVal,
+    idFieldName: metric.remoteMeta?.idFieldName,
+    FieldName: metric.fieldKey,
+    nameFieldVal: aggregatorMeta.label,
+    fvFieldVal: aggregatorMeta.fvFieldVal,
+    pvFieldVal: aggregatorMeta.pvFieldVal,
+  }
+}
+
+function getCurrentParentId() {
+  return currentSourceParentId.value
+}
+
+async function deleteSelectedConfig() {
+  if (!selectedConfigId.value) return
+  const entry = reportConfigs.value.find(
+    (cfg) => cfg.id === selectedConfigId.value,
   )
-  const entry = {
-    id: existingIndex >= 0 ? savedConfigs.value[existingIndex].id : createId(),
-    name: normalizedName,
-    updatedAt: new Date().toISOString(),
-    payload,
+  if (!entry) return
+  const idsToRemove = collectDeleteIds(entry.remoteMeta, entry.metrics)
+  for (const id of idsToRemove) {
+    await deleteComplexEntity(id)
   }
-  if (existingIndex >= 0) {
-    savedConfigs.value.splice(existingIndex, 1, entry)
-  } else {
-    savedConfigs.value.push(entry)
-  }
-  selectedConfigId.value = entry.id
+  selectedConfigId.value = ''
+  currentConfigMeta.value = null
+  await fetchReportConfigs(getCurrentParentId())
+}
+
+function collectDeleteIds(meta = {}, metrics = []) {
+  const ids = new Set()
+  const keys = [
+    'id',
+    'idRow',
+    'idFilter',
+    'idCol',
+    'idRowVal',
+    'idFilterVal',
+    'idColVal',
+    'idRowTotal',
+    'idColTotal',
+    'idCreatedAt',
+    'idUpdatedAt',
+  ]
+  keys.forEach((key) => {
+    const value = Number(meta[key])
+    if (Number.isFinite(value)) {
+      ids.add(value)
+    }
+  })
+  metrics.forEach((metric) => {
+    const remoteId = Number(metric.remoteMeta?.idMetricsComplex)
+    if (Number.isFinite(remoteId)) ids.add(remoteId)
+  })
+  return [...ids]
 }
 
 function snapshotCurrentConfig() {
@@ -2340,8 +2827,6 @@ function snapshotCurrentConfig() {
       columns: copyFilterStore(dimensionValueFilters.columns),
     },
     options: {
-      showRowTotals: pivotOptions.showRowTotals,
-      showColumnTotals: pivotOptions.showColumnTotals,
       headerOverrides: Object.entries(headerOverrides).reduce(
         (acc, [key, value]) => {
           if (value && value.trim()) {
@@ -2353,66 +2838,6 @@ function snapshotCurrentConfig() {
       ),
     },
     fieldMeta,
-  }
-}
-
-function loadSelectedConfig() {
-  const entry = savedConfigs.value.find(
-    (cfg) => cfg.id === selectedConfigId.value,
-  )
-  if (!entry) return
-  applyConfig(entry.payload)
-}
-
-function applyConfig(payload) {
-  replaceArray(pivotConfig.filters, payload?.pivot?.filters || [])
-  replaceArray(pivotConfig.rows, payload?.pivot?.rows || [])
-  replaceArray(pivotConfig.columns, payload?.pivot?.columns || [])
-  pivotMetrics.splice(
-    0,
-    pivotMetrics.length,
-    ...(payload?.metrics || []).map((metric) => ({ ...metric })),
-  )
-  pivotMetricsVersion.value += 1
-  if (!pivotMetrics.length) ensureMetricExists()
-
-  Object.keys(filterValues).forEach((key) => delete filterValues[key])
-  Object.entries(payload?.filterValues || {}).forEach(([key, values]) => {
-    filterValues[key] = [...values]
-  })
-  applyFilterSnapshot(
-    dimensionValueFilters.rows,
-    pivotConfig.rows,
-    payload?.dimensionValues?.rows || {},
-  )
-  applyFilterSnapshot(
-    dimensionValueFilters.columns,
-    pivotConfig.columns,
-    payload?.dimensionValues?.columns || {},
-  )
-  pivotOptions.showRowTotals =
-    payload?.options?.showRowTotals === undefined
-      ? true
-      : Boolean(payload.options.showRowTotals)
-  pivotOptions.showColumnTotals =
-    payload?.options?.showColumnTotals === undefined
-      ? true
-      : Boolean(payload.options.showColumnTotals)
-  Object.keys(headerOverrides).forEach((key) => delete headerOverrides[key])
-  Object.entries(payload?.options?.headerOverrides || {}).forEach(
-    ([key, value]) => {
-      headerOverrides[key] = value
-    },
-  )
-}
-
-function deleteSelectedConfig() {
-  const index = savedConfigs.value.findIndex(
-    (cfg) => cfg.id === selectedConfigId.value,
-  )
-  if (index >= 0) {
-    savedConfigs.value.splice(index, 1)
-    selectedConfigId.value = ''
   }
 }
 
@@ -2464,7 +2889,12 @@ function exportToCsv() {
     alert('Нет данных для экспорта')
     return
   }
-  const csv = buildCsvFromPivot(pivotView.value, pivotOptions)
+  const csv = buildCsvFromPivot(pivotView.value, {
+    showRowTotals: hasRowTotals.value,
+    showColumnTotals: hasColumnTotals.value,
+    rowMetricIds: rowTotalMetricIds.value,
+    columnMetricIds: columnTotalMetricIds.value,
+  })
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -2478,26 +2908,43 @@ function buildCsvFromPivot(
   view,
   options = { showRowTotals: true, showColumnTotals: true },
 ) {
+  const rowAllowed = new Set(options.rowMetricIds || [])
+  const columnAllowed = new Set(options.columnMetricIds || [])
+  const includeRowTotals = options.showRowTotals && rowAllowed.size > 0
+  const includeColumnTotals = options.showColumnTotals && columnAllowed.size > 0
+
+  const rowHeaders = includeRowTotals
+    ? view.rowTotalHeaders.filter((header) => rowAllowed.has(header.metricId))
+    : []
+
   const header = ['Строки', ...view.columns.map((col) => col.label)]
-  if (options.showRowTotals) {
-    header.push(...view.rowTotalHeaders.map((total) => total.label))
+  if (rowHeaders.length) {
+    header.push(...rowHeaders.map((total) => total.label))
   }
   const rows = view.rows.map((row) => {
     const cells = [row.label, ...row.cells.map((cell) => cell.display)]
-    if (options.showRowTotals) {
-      cells.push(...row.totals.map((total) => total.display))
+    if (rowHeaders.length) {
+      cells.push(
+        ...row.totals
+          .filter((total) => rowAllowed.has(total.metricId))
+          .map((total) => total.display),
+      )
     }
     return cells
   })
   const totalsRow = ['Итого по столбцам']
-  if (options.showColumnTotals) {
-    totalsRow.push(...view.columns.map((column) => column.totalDisplay))
+  if (includeColumnTotals) {
+    totalsRow.push(
+      ...view.columns.map((column) =>
+        columnAllowed.has(column.metricId) ? column.totalDisplay : '',
+      ),
+    )
   } else {
     totalsRow.push(...view.columns.map(() => ''))
   }
-  if (options.showRowTotals) {
+  if (rowHeaders.length) {
     totalsRow.push(
-      ...view.rowTotalHeaders.map((total) => view.grandTotals[total.metricId]),
+      ...rowHeaders.map((total) => view.grandTotals[total.metricId]),
     )
   }
 
@@ -2567,7 +3014,12 @@ function getFieldDisplayNameByKey(key = '') {
 
 function fieldValueOptions(field) {
   if (!field) return []
-  return (field.values || []).map((value) => ({
+  let descriptor = field
+  if (typeof field === 'string') {
+    descriptor = planFieldsMap.value.get(field)
+  }
+  if (!descriptor) return []
+  return (descriptor.values || []).map((value) => ({
     value,
     label: value || 'пусто',
   }))
@@ -2616,6 +3068,30 @@ function buildDictionaryItem(key) {
   }
 }
 
+function groupColumnsByLevel(columns, levelIndex) {
+  const cells = []
+  let pointer = 0
+  while (pointer < columns.length) {
+    const value = getColumnLevelValue(columns[pointer], levelIndex)
+    let span = 1
+    while (
+      pointer + span < columns.length &&
+      getColumnLevelValue(columns[pointer + span], levelIndex) === value
+    ) {
+      span += 1
+    }
+    cells.push({ label: value, colspan: span })
+    pointer += span
+  }
+  return cells
+}
+
+function getColumnLevelValue(column, levelIndex) {
+  const level = column.levels?.[levelIndex]
+  if (!level) return 'Итого'
+  return level.value || '—'
+}
+
 function getRawFieldLabel(key) {
   return FIELD_ALIASES[key] || humanizeKey(key)
 }
@@ -2645,14 +3121,17 @@ function normalizeDictionaryUrl(value) {
   box-sizing: border-box;
 }
 .step {
-  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border: 1px solid var(--s360-color-border-subtle, #ebe8e5);
   border-radius: var(--s360-radius-lg, 16px);
   background: var(--s360-color-surface, #fff);
   padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  width: 100%;
+  box-sizing: border-box;
+  width: 100%; /* растягиваемся ровно на доступную ширину секции */
+  max-width: 100%; /* не шире родителя */
+  margin: 0;
 }
 .step--disabled {
   opacity: 0.55;
@@ -2883,6 +3362,74 @@ function normalizeDictionaryUrl(value) {
   font-size: 12px;
   color: var(--s360-text-muted, #6b7280);
 }
+.layout-panel {
+  margin-top: 8px;
+}
+.layout-details {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.layout-details__header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.layout-details__header .n-input {
+  flex: 1;
+  min-width: 220px;
+}
+.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.layout-card {
+  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #fff;
+}
+.layout-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.layout-card__header--metrics {
+  align-items: center;
+}
+.layout-card__title {
+  font-weight: 600;
+}
+.layout-card__hint {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0;
+}
+.layout-field {
+  border-top: 1px solid #eef2ff;
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.layout-field__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.metric-options {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -2899,9 +3446,7 @@ function normalizeDictionaryUrl(value) {
   color: var(--s360-text-primary, #111827);
 }
 .field input,
-.field select,
-.config-block select,
-.config-block input {
+.field select {
   border: 1px solid var(--s360-color-border-subtle, #d1d5db);
   border-radius: 10px;
   padding: 10px 12px;
@@ -2931,18 +3476,6 @@ function normalizeDictionaryUrl(value) {
 .muted {
   color: var(--s360-text-muted, #6b7280);
   font-size: 13px;
-}
-.config-panel {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-.config-block {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
 }
 .pivot-settings {
   display: flex;
@@ -3263,19 +3796,35 @@ function normalizeDictionaryUrl(value) {
   border-collapse: collapse;
   font-size: 14px;
 }
-.th-content {
-  position: relative;
-  padding-right: 12px;
-}
-.column-levels {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
-  color: #475569;
-}
-.column-metric {
+.metric-header th {
+  text-align: left;
   font-weight: 600;
+  font-size: 14px;
+  padding: 8px 12px;
+}
+.row-header-title {
+  font-weight: 600;
+  text-align: left;
+}
+.column-header-row th {
+  text-align: center;
+}
+.column-field-group {
+  text-align: center;
+  font-weight: 500;
+  position: relative;
+}
+.column-field-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #94a3b8;
+}
+.column-field-value {
+  display: block;
+  font-size: 14px;
+  color: #111827;
 }
 .resize-handle {
   position: absolute;
