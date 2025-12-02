@@ -4,7 +4,7 @@
       <div>
         <h1>{{ isNew ? 'Новая страница' : 'Редактирование страницы' }}</h1>
         <p class="muted">
-          Задайте название, выберите фильтры и макет, а затем добавьте контейнеры с нужными шаблонами.
+          Задайте название, выберите фильтры и макет, а затем добавьте контейнеры с нужными представлениями.
         </p>
       </div>
       <div class="header-actions">
@@ -49,10 +49,20 @@
       <section class="containers">
         <header>
           <h2>Контейнеры</h2>
-          <button class="btn-outline btn-sm" type="button" @click="addContainer">
-            Добавить контейнер
-          </button>
+          <div class="containers__actions">
+            <button class="btn-link" type="button" @click="refreshTemplates" :disabled="templatesLoading">
+              {{ templatesLoading ? 'Обновляем…' : 'Обновить представления' }}
+            </button>
+            <button class="btn-outline btn-sm" type="button" @click="addContainer">
+              Добавить контейнер
+            </button>
+          </div>
         </header>
+        <p v-if="showTemplatesLoading" class="muted">Загружаем представления...</p>
+        <p v-else-if="templatesError" class="error-text">{{ templatesError }}</p>
+        <p v-else-if="!templates.length" class="muted">
+          Нет доступных представлений. Создайте их в разделе «Представления».
+        </p>
         <div v-if="!draft.layout.containers.length" class="muted">
           Контейнеры не добавлены.
         </div>
@@ -65,9 +75,18 @@
           </div>
           <div class="container-card__body">
             <label>
-              <span>Шаблон</span>
-              <select v-model="container.templateId">
-                <option disabled value="">Выберите шаблон</option>
+              <span>Представление</span>
+              <select
+                v-model="container.templateId"
+                :disabled="templatesLoading && !templates.length"
+              >
+                <option disabled value="">
+                  {{
+                    templatesLoading
+                      ? 'Загружаем представления'
+                      : 'Выберите представление'
+                  }}
+                </option>
                 <option v-for="template in templates" :key="template.id" :value="template.id">
                   {{ template.name }}
                 </option>
@@ -93,10 +112,16 @@
             </label>
           </div>
           <p class="muted" v-if="container.templateId">
-            {{
-              templates.find((tpl) => tpl.id === container.templateId)?.description ||
-              'Без описания'
-            }}
+            {{ templateMeta(container.templateId)?.description || 'Без описания' }}
+          </p>
+          <p class="muted" v-else>
+            Выберите представление, чтобы связать контейнер с источником данных.
+          </p>
+          <p v-if="templateMeta(container.templateId)?.missingConfig" class="warning-text">
+            У этого представления нет сохранённой конфигурации. Свяжите его с нужным набором полей.
+          </p>
+          <p v-if="templateMeta(container.templateId)?.missingSource" class="warning-text">
+            У представления отсутствует источник данных. Виджет не сможет загрузить данные, пока источник не будет указан.
           </p>
         </article>
       </section>
@@ -105,7 +130,7 @@
 </template>
 
 <script setup>
-import { computed, reactive } from 'vue'
+import { computed, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 
@@ -139,9 +164,25 @@ if (!isNew.value) {
   }
 }
 
+onMounted(() => {
+  store.fetchTemplates(true)
+})
+
 const templates = computed(() => store.templates)
+const templatesLoading = computed(() => store.templatesLoading)
+const templatesError = computed(() => store.templatesError)
+const showTemplatesLoading = computed(() => templatesLoading.value && !templates.value.length)
 const filters = computed(() => store.filters)
 const layoutPresets = computed(() => store.layoutPresets)
+
+function templateMeta(templateId) {
+  if (!templateId) return null
+  return templates.value.find((tpl) => tpl.id === templateId) || null
+}
+
+function refreshTemplates() {
+  store.fetchTemplates(true)
+}
 
 function addContainer() {
   draft.layout.containers.push({
@@ -229,6 +270,11 @@ function goBack() {
   justify-content: space-between;
   align-items: center;
 }
+.containers__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .container-card {
   border: 1px solid #e5e7eb;
   border-radius: 12px;
@@ -261,5 +307,25 @@ function goBack() {
 .header-actions {
   display: flex;
   gap: 8px;
+}
+.error-text {
+  color: #b91c1c;
+  font-size: 13px;
+}
+.warning-text {
+  color: #b45309;
+  font-size: 13px;
+}
+.btn-link {
+  border: none;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 0;
+  font-size: 13px;
+}
+.btn-link:disabled {
+  color: #9ca3af;
+  cursor: default;
 }
 </style>

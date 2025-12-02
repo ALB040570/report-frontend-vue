@@ -2,7 +2,7 @@
   <section class="page">
     <header class="page__header">
       <div>
-        <h1>Управление представлениями</h1>
+        <h1>Управление представлениями данных</h1>
         <p class="muted">
           Создавайте и редактируйте сохраненные конфигурации данных. Их можно
           повторно использовать при настройке произвольных страниц.
@@ -41,7 +41,9 @@
           }}</span>
         </header>
 
-        <p class="card__description">{{ view.description || 'Без описания' }}</p>
+        <p class="card__description">
+          {{ view.description || 'Без описания' }}
+        </p>
 
         <div class="card__actions">
           <button
@@ -58,7 +60,9 @@
             type="button"
             :class="{ 'is-active': detailsId === view.id }"
             @click="toggleDetails(view.id)"
-            :aria-label="detailsId === view.id ? 'Скрыть детали' : 'Показать детали'"
+            :aria-label="
+              detailsId === view.id ? 'Скрыть детали' : 'Показать детали'
+            "
             :title="detailsId === view.id ? 'Скрыть детали' : 'Показать детали'"
           >
             <span class="icon icon-info" />
@@ -225,7 +229,9 @@ function previewView(view) {
   const configId = toRouteId(view?.config?.remoteId ?? view?.config?.id)
   const presentationId = toRouteId(view?.remoteId ?? view?.remoteMeta?.id)
   if (!sourceId || !configId || !presentationId) {
-    alert('Не удалось открыть представление: проверьте источник и конфигурацию.')
+    alert(
+      'Не удалось открыть представление: проверьте источник и конфигурацию.',
+    )
     return
   }
   navigationStore.allowDataAccess()

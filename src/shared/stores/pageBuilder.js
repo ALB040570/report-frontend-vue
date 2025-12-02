@@ -1,69 +1,7 @@
 import { defineStore } from 'pinia'
+import { fetchReportViewTemplates } from '@/shared/services/reportViews'
 
 const PAGE_STORAGE_KEY = 'page-builder-pages'
-const TEMPLATE_STORAGE_KEY = 'page-builder-templates'
-
-const defaultTemplates = [
-  {
-    id: 'tpl-traffic',
-    name: 'Сводка по отклонениям',
-    description: 'Планы: перекос и просадки по участкам с графиком.',
-    dataSource: 'plans',
-    visualization: 'bar',
-    snapshot: {
-      pivot: {
-        rows: ['StartKm'],
-        columns: ['PlanDateEnd'],
-        filters: [],
-      },
-      metrics: [{ id: 'metric-1', fieldKey: 'PlanDateEnd', aggregator: 'count' }],
-    },
-  },
-  {
-    id: 'tpl-parameters',
-    name: 'Параметры пути',
-    description: 'Параметры инспекции по локациям.',
-    dataSource: 'parameters',
-    visualization: 'table',
-    snapshot: {
-      pivot: {
-        rows: ['objLocation'],
-        columns: [],
-        filters: ['period'],
-      },
-      metrics: [{ id: 'metric-2', fieldKey: 'periodType', aggregator: 'count' }],
-    },
-  },
-]
-
-const defaultPages = [
-  {
-    id: 'page-monitoring',
-    menuTitle: 'Мониторинг пути',
-    pageTitle: 'Мониторинг пути',
-    description: 'Страница со сводкой по планам и параметрам инспекции.',
-    filters: ['period', 'area'],
-    layout: {
-      preset: 'two-column',
-      containers: [
-        {
-          id: 'slot-1',
-          title: 'Отклонения плана',
-          templateId: 'tpl-traffic',
-          width: '1fr',
-          height: 'auto',
-        },
-        {
-          id: 'slot-2',
-          title: 'Параметры путей',
-          templateId: 'tpl-parameters',
-          width: '1fr',
-          height: 'auto',
-        },
-      ],
-    },
-  },
-]
 
 const layoutPresets = [
   { value: 'single', label: 'Одна колонка', template: '1fr' },
@@ -101,7 +39,7 @@ const filterLibrary = [
   },
 ]
 
-function loadFromStorage(key, fallback) {
+function loadFromStorage(key, fallback = []) {
   if (typeof window === 'undefined') return structuredClone(fallback)
   try {
     const raw = window.localStorage.getItem(key)
@@ -126,8 +64,11 @@ function createId(prefix = 'id') {
 
 export const usePageBuilderStore = defineStore('pageBuilder', {
   state: () => ({
-    pages: loadFromStorage(PAGE_STORAGE_KEY, defaultPages),
-    templates: loadFromStorage(TEMPLATE_STORAGE_KEY, defaultTemplates),
+    pages: loadFromStorage(PAGE_STORAGE_KEY, []),
+    templates: [],
+    templatesLoading: false,
+    templatesLoaded: false,
+    templatesError: '',
     filters: filterLibrary,
     layoutPresets,
   }),
@@ -163,49 +104,25 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
         persist(PAGE_STORAGE_KEY, this.pages)
       }
     },
-    saveTemplate(payload) {
-      const template = structuredClone(payload)
-      template.id = template.id || createId('tpl')
-      const index = this.templates.findIndex((item) => item.id === template.id)
-      if (index >= 0) {
-        this.templates.splice(index, 1, template)
-      } else {
-        this.templates.push(template)
-      }
-      persist(TEMPLATE_STORAGE_KEY, this.templates)
-      return template.id
-    },
-    updateTemplate(templateId, patch) {
-      const index = this.templates.findIndex((item) => item.id === templateId)
-      if (index === -1) return
-      const current = this.templates[index]
-      const next = {
-        ...current,
-        ...structuredClone(patch),
-        id: templateId,
-      }
-      this.templates.splice(index, 1, next)
-      persist(TEMPLATE_STORAGE_KEY, this.templates)
-      return next
-    },
-    removeTemplate(templateId) {
-      const index = this.templates.findIndex((item) => item.id === templateId)
-      if (index === -1) return
-      this.templates.splice(index, 1)
-      persist(TEMPLATE_STORAGE_KEY, this.templates)
-
-      let pagesChanged = false
-      this.pages.forEach((page) => {
-        const containers = page?.layout?.containers || []
-        containers.forEach((container) => {
-          if (container.templateId === templateId) {
-            container.templateId = ''
-            pagesChanged = true
-          }
-        })
-      })
-      if (pagesChanged) {
-        persist(PAGE_STORAGE_KEY, this.pages)
+    async fetchTemplates(force = false) {
+      if (this.templatesLoading || (this.templatesLoaded && !force)) return
+      this.templatesLoading = true
+      this.templatesError = ''
+      try {
+        const remoteTemplates = await fetchReportViewTemplates()
+        if (Array.isArray(remoteTemplates) && remoteTemplates.length) {
+          this.templates = remoteTemplates
+          this.templatesLoaded = true
+        } else {
+          this.templates = []
+          this.templatesLoaded = true
+        }
+      } catch (err) {
+        console.warn('Failed to load report templates', err)
+        this.templatesError = 'Не удалось загрузить представления.'
+        this.templates = []
+      } finally {
+        this.templatesLoading = false
       }
     },
   },

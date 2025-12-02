@@ -40,14 +40,14 @@
         <header>
           <h3>{{ container.title || template(container.templateId)?.name || 'Контейнер' }}</h3>
           <span class="tag">
-            {{ dataSourceLabel(template(container.templateId)?.dataSource) }}
+            {{ dataSourceLabel(template(container.templateId)) }}
           </span>
         </header>
         <p class="muted" v-if="template(container.templateId)">
           {{ template(container.templateId).description || 'Без описания' }}
         </p>
         <p class="muted" v-else>
-          Привяжите шаблон, чтобы контейнер мог отобразить данные.
+          Привяжите представление, чтобы контейнер мог отобразить данные.
         </p>
 
         <div v-if="template(container.templateId)" class="widget-body">
@@ -222,11 +222,12 @@
 </template>
 
 <script setup>
-import { computed, reactive, watch, onBeforeUnmount } from 'vue'
+import { computed, reactive, watch, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 import { fetchPlanRecords } from '@/shared/api/plan'
 import { fetchParameterRecords } from '@/shared/api/parameter'
+import { sendDataSourceRequest } from '@/shared/api/dataSource'
 import ReportChart from '@/components/ReportChart.vue'
 import { buildPivotView, normalizeValue } from '@/shared/lib/pivotUtils'
 import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
@@ -234,6 +235,10 @@ import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
 const route = useRoute()
 const router = useRouter()
 const store = usePageBuilderStore()
+
+onMounted(() => {
+  store.fetchTemplates()
+})
 
 const pageId = computed(() => route.params.pageId)
 const page = computed(() => store.getPageById(pageId.value))
@@ -280,7 +285,10 @@ let refreshTimer = null
 function template(templateId) {
   return store.getTemplateById(templateId)
 }
-function dataSourceLabel(value) {
+function dataSourceLabel(tpl) {
+  if (!tpl) return 'Не задан'
+  if (tpl.remoteSource?.name) return tpl.remoteSource.name
+  const value = tpl.dataSource
   if (value === 'plans') return 'Планы'
   if (value === 'parameters') return 'Параметры'
   if (!value) return 'Не задан'
@@ -571,8 +579,18 @@ function includesNodeKey(node, key) {
   return node.children?.some((child) => includesNodeKey(child, key))
 }
 
-async function ensureData(source) {
-  if (!source) throw new Error('В шаблоне не выбран источник данных.')
+async function ensureTemplateData(tpl) {
+  if (!tpl) {
+    throw new Error('Привяжите представление для отображения данных.')
+  }
+  if (tpl.remoteSource) {
+    return ensureRemoteSourceData(tpl.remoteSource)
+  }
+  return ensureFallbackData(tpl.dataSource)
+}
+
+async function ensureFallbackData(source) {
+  if (!source) throw new Error('В представлении не выбран источник данных.')
   if (dataCache[source]) return dataCache[source]
   let records = []
   if (source === 'plans') {
@@ -584,6 +602,67 @@ async function ensureData(source) {
   }
   dataCache[source] = records
   return records
+}
+
+async function ensureRemoteSourceData(source) {
+  const cacheKey =
+    source?.remoteId ||
+    source?.id ||
+    `${source?.method || 'POST'}:${source?.url || source?.remoteMeta?.URL || ''}`
+  if (cacheKey && dataCache[cacheKey]) {
+    return dataCache[cacheKey]
+  }
+  const request = buildRemoteRequest(source)
+  const response = await sendDataSourceRequest(request)
+  const records = extractRecords(response)
+  if (cacheKey) {
+    dataCache[cacheKey] = records
+  }
+  return records
+}
+
+function buildRemoteRequest(source = {}) {
+  const url = source?.url || source?.remoteMeta?.URL || ''
+  if (!url) {
+    throw new Error('У источника данных отсутствует URL.')
+  }
+  const method = String(source?.method || source?.remoteMeta?.Method || 'POST').toUpperCase()
+  const headers = normalizeRemoteHeaders(source?.headers || source?.remoteMeta?.Headers)
+  const body = normalizeRemoteBody(source?.body ?? source?.remoteMeta?.MethodBody)
+  return { url, method, headers, body }
+}
+
+function normalizeRemoteHeaders(raw) {
+  if (!raw) return { 'Content-Type': 'application/json' }
+  if (typeof raw === 'object') return raw
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') return parsed
+  } catch {
+    // ignore
+  }
+  return { 'Content-Type': 'application/json' }
+}
+
+function normalizeRemoteBody(raw) {
+  if (raw == null || raw === '') return undefined
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return raw
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return raw
+  }
+}
+
+function extractRecords(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return Array.isArray(payload) ? payload : []
+  }
+  if (Array.isArray(payload.result?.records)) return payload.result.records
+  if (Array.isArray(payload.result)) return payload.result
+  if (Array.isArray(payload.records)) return payload.records
+  return []
 }
 
 function matchFieldSet(record, keys = [], store = {}) {
@@ -742,7 +821,7 @@ async function hydrateContainer(container) {
   const state = containerState(container.id)
   if (!tpl) {
     state.loading = false
-    state.error = 'Привяжите шаблон для отображения данных.'
+    state.error = 'Привяжите представление для отображения данных.'
     state.view = null
     state.chart = null
     state.signature = ''
@@ -764,18 +843,18 @@ async function hydrateContainer(container) {
     return
   }
 
-    state.signature = signature
+  state.signature = signature
   state.loading = true
   state.error = ''
   state.view = null
   state.chart = null
 
   try {
-    const records = await ensureData(tpl.dataSource)
+    const records = await ensureTemplateData(tpl)
     const filtered = filterRecords(records, tpl.snapshot, tpl.dataSource, container.id)
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
     if (!metrics.length) {
-      throw new Error('В шаблоне не выбраны метрики.')
+      throw new Error('В представлении не выбраны метрики.')
     }
     const view = buildPivotView({
       records: filtered,
