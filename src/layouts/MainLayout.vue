@@ -33,7 +33,11 @@
     </header>
 
     <div class="body">
-      <aside class="sider" :class="{ collapsed: asideCollapsed }" :style="siderStyle">
+      <aside
+        class="sider"
+        :class="{ collapsed: asideCollapsed }"
+        :style="siderStyle"
+      >
         <nav class="sider__nav">
           <div v-if="navPages.length" class="sider__section">
             <div class="sider__section-title">Дашборды</div>
@@ -56,7 +60,7 @@
               type="button"
               @click="constructorOpen = !constructorOpen"
             >
-              <span>Конструктор представлений</span>
+              <span>Конструктор</span>
               <span class="chevron" :class="{ 'is-open': constructorOpen }" />
             </button>
             <transition name="fade">
@@ -129,7 +133,10 @@ function startResize(event) {
   const startWidth = siderWidth.value
   const onMove = (e) => {
     const delta = e.clientX - startX
-    const next = Math.max(minSiderWidth, Math.min(maxSiderWidth, startWidth + delta))
+    const next = Math.max(
+      minSiderWidth,
+      Math.min(maxSiderWidth, startWidth + delta),
+    )
     siderWidth.value = next
   }
   const onUp = () => {

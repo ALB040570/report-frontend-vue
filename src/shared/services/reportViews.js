@@ -95,9 +95,22 @@ function buildSnapshot(config) {
       headerOverrides: config.headerOverrides,
       sorts: config.sorts,
     },
-    filtersMeta: config.filtersMeta,
+    filtersMeta: ensureFilterMeta(config),
     fieldMeta: config.fieldMeta,
   }
+}
+
+function ensureFilterMeta(config = {}) {
+  if (Array.isArray(config.filtersMeta) && config.filtersMeta.length) {
+    return config.filtersMeta
+  }
+  const filters = config.pivot?.filters || []
+  if (!filters.length) return []
+  return filters.map((key) => ({
+    key,
+    label: config.headerOverrides?.[key] || key,
+    values: [],
+  }))
 }
 
 function normalizePresentation(entry = {}, index = 0, visualizationMap) {

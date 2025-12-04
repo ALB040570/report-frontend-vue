@@ -35,6 +35,7 @@
 - Верни `VITE_API_DEV_PROXY_BASE=/api`.
 - Убедись, что запросы в коде тоже идут на `/api/...`.
 - Перезапусти `npm run dev`.
+- Для словаря полей укажи `VITE_FIELD_DICTIONARY_URL=/dtj/api/client` (без origin). В dev абсолютный URL не пройдёт через прокси и браузер заблокирует запрос.
 
 ---
 

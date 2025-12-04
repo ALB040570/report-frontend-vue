@@ -147,7 +147,7 @@
             <dt>Фильтры</dt>
             <dd>{{ formatFields(view.filters, view.headerOverrides) }}</dd>
             <dt>Метрики</dt>
-            <dd>{{ formatList(view.metrics) }}</dd>
+            <dd>{{ formatMetrics(view.metrics) }}</dd>
             <dt>Сохранено</dt>
             <dd>{{ formatDate(view.createdAt) }}</dd>
           </dl>
@@ -183,6 +183,7 @@ const editSaving = ref(false)
 const visualizationTypes = ref([])
 const fieldDictionaryStore = useFieldDictionaryStore()
 const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
+const dictionaryLabelsLower = computed(() => fieldDictionaryStore.labelMapLower || {})
 const editDraft = reactive({
   name: '',
   description: '',
@@ -190,6 +191,7 @@ const editDraft = reactive({
 })
 
 onMounted(() => {
+  fieldDictionaryStore.fetchDictionary()
   fetchVisualizations()
   fetchViews()
 })
@@ -383,12 +385,14 @@ async function removeView(view) {
   }
 }
 
-function formatList(value) {
-  if (!value) return '—'
-  if (Array.isArray(value)) {
-    return value.length ? value.join(', ') : '—'
-  }
-  return String(value)
+function dictionaryLabelValue(key) {
+  if (key === null || typeof key === 'undefined') return ''
+  const normalizedKey = String(key).trim()
+  if (!normalizedKey) return ''
+  const direct = dictionaryLabels.value?.[normalizedKey]
+  if (direct) return direct
+  const lower = normalizedKey.toLowerCase()
+  return dictionaryLabelsLower.value?.[lower] || ''
 }
 
 function formatFields(list = [], overrides = {}) {
@@ -397,11 +401,30 @@ function formatFields(list = [], overrides = {}) {
     .map((key) => {
       const override = overrides?.[key]?.trim?.()
       if (override) return override
-      const dictionaryLabel = dictionaryLabels.value?.[key]
+      const dictionaryLabel = dictionaryLabelValue(key)
       if (dictionaryLabel) return dictionaryLabel
       return humanizeKey(key)
     })
     .join(', ')
+}
+
+function formatMetrics(list = []) {
+  if (!Array.isArray(list) || !list.length) return '—'
+  const values = list
+    .map((meta) => {
+      if (!meta) return ''
+      const dictionaryLabel = dictionaryLabelValue(meta.key)
+      const fieldLabel =
+        dictionaryLabel ||
+        meta.label ||
+        (meta.key ? humanizeKey(meta.key) : '')
+      if (meta.aggregate && fieldLabel) {
+        return `${meta.aggregate}: ${fieldLabel}`
+      }
+      return fieldLabel || meta.aggregate || ''
+    })
+    .filter(Boolean)
+  return values.length ? values.join(', ') : '—'
 }
 
 function formatDate(value) {
@@ -507,7 +530,9 @@ function normalizeConfig(entry = {}, index = 0) {
     columns: parseFieldSequence(entry?.Col),
     filters: parseFieldSequence(entry?.Filter),
     metrics: Array.isArray(entry?.complex)
-      ? entry.complex.map(formatMetricLabel).filter(Boolean)
+      ? entry.complex
+          .map((record, metricIndex) => normalizeMetricRecord(record, metricIndex))
+          .filter(Boolean)
       : [],
     headerOverrides,
     remoteMeta: entry || {},
@@ -525,11 +550,31 @@ function normalizeSource(entry = {}, index = 0) {
   }
 }
 
-function formatMetricLabel(entry = {}) {
-  const agg = entry?.name || entry?.Name || entry?.AggregateName || ''
-  const field = entry?.FieldName || entry?.Field || entry?.FieldLabel || ''
-  if (agg && field) return `${agg}: ${field}`
-  return field || agg || ''
+function normalizeMetricRecord(entry = {}, index = 0) {
+  const aggregate = entry?.name || entry?.Name || entry?.AggregateName || ''
+  const key =
+    entry?.FieldName ||
+    entry?.fieldName ||
+    entry?.Field ||
+    entry?.field ||
+    entry?.FieldKey ||
+    entry?.fieldKey ||
+    ''
+  const label =
+    entry?.FieldLabel ||
+    entry?.fieldLabel ||
+    entry?.FieldCaption ||
+    entry?.Caption ||
+    entry?.Label ||
+    ''
+  if (!aggregate && !key && !label) return null
+  const remoteId = toNumericId(entry?.id ?? entry?.Id ?? entry?.ID)
+  return {
+    id: remoteId ? String(remoteId) : createLocalId(`metric-${index}`),
+    aggregate: String(aggregate || '').trim(),
+    key: String(key || '').trim(),
+    label: String(label || '').trim(),
+  }
 }
 
 function parseFieldSequence(value) {

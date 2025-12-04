@@ -995,6 +995,7 @@ onMounted(() => {
   dataSourcesStore.fetchRemoteSources()
   dataSourcesStore.fetchMethodTypes()
   dataSourcesStore.fetchUserContext()
+  fieldDictionaryStore.fetchDictionary()
   fetchAggregatorFactors()
   fetchVisualizationTypes()
 })
@@ -3136,6 +3137,7 @@ function encodeFilterPayload() {
       remoteId: metric.remoteMeta?.idMetricsComplex,
       fieldKey: metric.fieldKey,
     })),
+    filtersMeta: buildFiltersMetaSnapshot(),
   })
 }
 
@@ -3166,6 +3168,28 @@ function cloneSortState(store = {}) {
     }
     return acc
   }, {})
+}
+
+function buildFiltersMetaSnapshot() {
+  if (!pivotConfig.filters.length) return []
+  return pivotConfig.filters.map((key) => ({
+    key,
+    label: getFieldDisplayNameByKey(key),
+    values: collectFilterMetaValues(key),
+  }))
+}
+
+function collectFilterMetaValues(key) {
+  const options = fieldValueOptions(key)
+  if (!options || !options.length) return []
+  const unique = new Set()
+  options.forEach((option) => {
+    const normalized = normalizeValue(option.value)
+    if (!unique.has(normalized)) {
+      unique.add(normalized)
+    }
+  })
+  return Array.from(unique)
 }
 
 function normalizeRemoteMetric(entry = {}, metricSettings = []) {

@@ -5,12 +5,40 @@
         <h1>{{ page.pageTitle }}</h1>
         <p class="muted">{{ page.description || 'Описание отсутствует' }}</p>
       </div>
-      <button class="btn-outline" type="button" @click="editPage">Настроить</button>
+      <div class="page__actions">
+        <button
+          class="btn-outline btn-outline--icon"
+          type="button"
+          :disabled="exportingExcel"
+          @click="exportPageAsExcel"
+        >
+          <span>Выгрузить</span>
+        </button>
+        <button
+          class="btn-outline btn-outline--icon"
+          type="button"
+          :disabled="pageRefreshing"
+          @click="refreshPageData"
+        >
+          <span>{{ pageRefreshing ? 'Обновляем…' : 'Обновить' }}</span>
+        </button>
+        <button
+          class="btn-outline btn-outline--icon"
+          type="button"
+          @click="editPage"
+        >
+          <span>Настроить</span>
+        </button>
+      </div>
     </header>
 
     <div v-if="activePageFilters.length" class="page-filters">
       <div class="page-filters__fields">
-        <label v-for="filter in activePageFilters" :key="filter.key" class="page-filter">
+        <label
+          v-for="filter in activePageFilters"
+          :key="filter.key"
+          class="page-filter"
+        >
           <span>{{ filter.label }}</span>
           <input
             v-model="pageFilterValues[filter.key]"
@@ -38,7 +66,13 @@
         :style="containerStyle(container)"
       >
         <header>
-          <h3>{{ container.title || template(container.templateId)?.name || 'Контейнер' }}</h3>
+          <h3>
+            {{
+              container.title ||
+              template(container.templateId)?.name ||
+              'Контейнер'
+            }}
+          </h3>
           <span class="tag">
             {{ dataSourceLabel(template(container.templateId)) }}
           </span>
@@ -51,7 +85,10 @@
         </p>
 
         <div v-if="template(container.templateId)" class="widget-body">
-          <div v-if="templateFilters(container).length" class="container-filters">
+          <div
+            v-if="templateFilters(container).length"
+            class="container-filters"
+          >
             <article
               v-for="filter in templateFilters(container)"
               :key="`${container.id}-${filter.key}`"
@@ -63,7 +100,9 @@
                   class="btn-link"
                   type="button"
                   @click="resetContainerFilter(container.id, filter.key)"
-                  :disabled="!(containerFilterValues[container.id]?.[filter.key]?.length)"
+                  :disabled="
+                    !containerFilterValues[container.id]?.[filter.key]?.length
+                  "
                 >
                   Очистить
                 </button>
@@ -76,50 +115,178 @@
               />
             </article>
           </div>
-          <div v-if="containerState(container.id).loading" class="widget-placeholder">
+          <div
+            v-if="containerState(container.id).loading"
+            class="widget-placeholder"
+          >
             Загружаем данные...
           </div>
-          <div v-else-if="containerState(container.id).error" class="widget-error">
+          <div
+            v-else-if="containerState(container.id).error"
+            class="widget-error"
+          >
             {{ containerState(container.id).error }}
           </div>
           <template v-else-if="containerState(container.id).view">
             <div class="pivot-wrapper" v-if="isTableVisualization(container)">
               <table class="pivot-table">
                 <thead>
-                  <tr>
-                    <th :style="rowHeaderStyle(container.id)">
+                  <tr v-if="hasMetricGroups(container)" class="metric-header">
+                    <th
+                      :rowspan="containerRowHeaderRowSpan(container)"
+                      :style="rowHeaderStyle(container.id)"
+                      class="row-header-title"
+                    >
                       <div class="th-content">
-                        Строки
+                        {{ containerRowHeaderTitle(container) }}
                         <span
                           class="resize-handle"
-                          @mousedown.prevent="startRowHeaderResize(container.id, $event)"
+                          @mousedown.prevent="
+                            startRowHeaderResize(container.id, $event)
+                          "
                         ></span>
                       </div>
                     </th>
                     <th
-                      v-for="column in containerState(container.id).view.columns"
+                      v-for="group in containerMetricColumnGroups(container)"
+                      :key="`metric-${container.id}-${group.metric.id}`"
+                      :colspan="group.span || 1"
+                      class="column-field-group"
+                    >
+                      <div class="th-content">
+                        <span class="column-field-value">
+                          {{ group.label }}
+                        </span>
+                      </div>
+                    </th>
+                    <th
+                      v-if="shouldShowRowTotals(container)"
+                      :rowspan="containerRowHeaderRowSpan(container)"
+                      class="column-field-group"
+                    >
+                      <span class="column-field-value">Итоги</span>
+                    </th>
+                  </tr>
+                  <template v-if="containerColumnFieldRows(container).length">
+                    <tr
+                      v-for="(headerRow, rowIndex) in containerColumnFieldRows(
+                        container,
+                      )"
+                      :key="`column-header-${container.id}-${rowIndex}`"
+                      class="column-header-row"
+                    >
+                      <th
+                        v-if="!hasMetricGroups(container) && rowIndex === 0"
+                        :rowspan="containerColumnFieldRows(container).length"
+                        :style="rowHeaderStyle(container.id)"
+                        class="row-header-title"
+                      >
+                        <div class="th-content">
+                          {{ containerRowHeaderTitle(container) }}
+                          <span
+                            class="resize-handle"
+                            @mousedown.prevent="
+                              startRowHeaderResize(container.id, $event)
+                            "
+                          ></span>
+                        </div>
+                      </th>
+                      <template
+                        v-for="segment in headerRow.segments"
+                        :key="`segment-${container.id}-${rowIndex}-${segment.metricId}`"
+                      >
+                        <template
+                          v-for="(cell, cellIndex) in segment.cells"
+                          :key="`cell-${container.id}-${rowIndex}-${segment.metricId}-${cellIndex}`"
+                        >
+                          <th
+                            v-if="cell.isValue"
+                            :style="
+                              tableColumnStyle(container.id, cell.styleKey)
+                            "
+                            class="column-field-group"
+                          >
+                            <div class="th-content">
+                              <span class="column-field-value">
+                                {{ cell.label }}
+                              </span>
+                              <span
+                                class="resize-handle"
+                                @mousedown.prevent="
+                                  startTableColumnResize(
+                                    container.id,
+                                    cell.styleKey,
+                                    $event,
+                                  )
+                                "
+                              ></span>
+                            </div>
+                          </th>
+                          <th
+                            v-else
+                            :colspan="cell.colspan"
+                            class="column-field-group"
+                          >
+                            <span class="column-field-value">
+                              {{ cell.label }}
+                            </span>
+                          </th>
+                        </template>
+                      </template>
+                      <th
+                        v-if="
+                          !hasMetricGroups(container) &&
+                          rowIndex === 0 &&
+                          shouldShowRowTotals(container)
+                        "
+                        :rowspan="containerColumnFieldRows(container).length"
+                        class="column-field-group"
+                      >
+                        <span class="column-field-value">Итоги</span>
+                      </th>
+                    </tr>
+                  </template>
+                  <tr v-else>
+                    <th
+                      v-if="!hasMetricGroups(container)"
+                      :style="rowHeaderStyle(container.id)"
+                      class="row-header-title"
+                    >
+                      <div class="th-content">
+                        {{ containerRowHeaderTitle(container) }}
+                        <span
+                          class="resize-handle"
+                          @mousedown.prevent="
+                            startRowHeaderResize(container.id, $event)
+                          "
+                        ></span>
+                      </div>
+                    </th>
+                    <th
+                      v-for="column in containerState(container.id).view
+                        .columns"
                       :key="column.key"
                       :style="tableColumnStyle(container.id, column.key)"
                     >
                       <div class="th-content">
-                        <div
-                          v-if="column.levels?.length"
-                          class="column-levels"
-                        >
-                          <span v-for="(level, idx) in column.levels" :key="`${column.key}-lvl-${idx}`">
-                            {{ level.fieldLabel }}: {{ level.value }}
-                          </span>
-                        </div>
-                        <div class="column-metric">{{ column.label }}</div>
+                        <span class="column-field-value">{{
+                          column.label
+                        }}</span>
                         <span
                           class="resize-handle"
-                          @mousedown.prevent="startTableColumnResize(container.id, column.key, $event)"
+                          @mousedown.prevent="
+                            startTableColumnResize(
+                              container.id,
+                              column.key,
+                              $event,
+                            )
+                          "
                         ></span>
                       </div>
                     </th>
                     <template v-if="shouldShowRowTotals(container)">
                       <th
-                        v-for="total in containerState(container.id).view.rowTotalHeaders"
+                        v-for="total in containerRowTotalHeaders(container)"
                         :key="`row-total-${total.metricId}`"
                       >
                         {{ total.label }}
@@ -134,25 +301,31 @@
                     :style="tableRowStyle(container.id, row.key)"
                   >
                     <td class="row-label" :style="rowHeaderStyle(container.id)">
-                      <div class="row-tree" :style="{ paddingLeft: `${row.depth * 18}px` }">
+                      <div
+                        class="row-tree"
+                        :style="{ paddingLeft: `${row.depth * 18}px` }"
+                      >
                         <button
                           v-if="row.hasChildren"
                           class="row-toggle"
                           type="button"
                           @click="toggleContainerRow(container.id, row.key)"
                         >
-                          {{ isContainerRowCollapsed(container.id, row.key) ? '+' : '−' }}
+                          {{
+                            isContainerRowCollapsed(container.id, row.key)
+                              ? '+'
+                              : '−'
+                          }}
                         </button>
                         <div class="row-content">
-                          <span class="row-field" v-if="row.fieldLabel">
-                            {{ row.fieldLabel }}:
-                          </span>
                           <span>{{ row.label }}</span>
                         </div>
                       </div>
                       <span
                         class="row-resize-handle"
-                        @mousedown.prevent="startTableRowResize(container.id, row.key, $event)"
+                        @mousedown.prevent="
+                          startTableRowResize(container.id, row.key, $event)
+                        "
                       ></span>
                     </td>
                     <td v-for="cell in row.cells" :key="cell.key" class="cell">
@@ -160,7 +333,7 @@
                     </td>
                     <template v-if="shouldShowRowTotals(container)">
                       <td
-                        v-for="total in row.totals"
+                        v-for="total in containerRowTotals(container, row)"
                         :key="`row-${row.key}-${total.metricId}`"
                         class="total"
                       >
@@ -169,25 +342,41 @@
                     </template>
                   </tr>
                 </tbody>
-                <tfoot v-if="shouldShowRowTotals(container) || shouldShowColumnTotals(container)">
+                <tfoot
+                  v-if="
+                    shouldShowRowTotals(container) ||
+                    shouldShowColumnTotals(container)
+                  "
+                >
                   <tr>
-                    <td v-if="shouldShowColumnTotals(container)">Итого по столбцам</td>
+                    <td v-if="shouldShowColumnTotals(container)">
+                      Итого по столбцам
+                    </td>
                     <template v-if="shouldShowColumnTotals(container)">
                       <td
-                        v-for="column in containerState(container.id).view.columns"
+                        v-for="column in containerState(container.id).view
+                          .columns"
                         :key="`total-${column.key}`"
                         class="total"
                       >
-                        {{ column.totalDisplay }}
+                        {{
+                          shouldDisplayColumnTotal(container, column.metricId)
+                            ? column.totalDisplay
+                            : '—'
+                        }}
                       </td>
                     </template>
                     <template v-if="shouldShowRowTotals(container)">
                       <td
-                        v-for="total in containerState(container.id).view.rowTotalHeaders"
+                        v-for="total in containerRowTotalHeaders(container)"
                         :key="`grand-${total.metricId}`"
                         class="grand-total"
                       >
-                        {{ containerState(container.id).view.grandTotals[total.metricId] }}
+                        {{
+                          containerState(container.id).view.grandTotals[
+                            total.metricId
+                          ]
+                        }}
                       </td>
                     </template>
                   </tr>
@@ -222,26 +411,39 @@
 </template>
 
 <script setup>
-import { computed, reactive, watch, onBeforeUnmount, onMounted } from 'vue'
+import { computed, reactive, ref, watch, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 import { fetchPlanRecords } from '@/shared/api/plan'
 import { fetchParameterRecords } from '@/shared/api/parameter'
 import { sendDataSourceRequest } from '@/shared/api/dataSource'
 import ReportChart from '@/components/ReportChart.vue'
-import { buildPivotView, normalizeValue } from '@/shared/lib/pivotUtils'
+import {
+  buildPivotView,
+  normalizeValue,
+  humanizeKey,
+} from '@/shared/lib/pivotUtils'
 import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
+import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
 
 const route = useRoute()
 const router = useRouter()
 const store = usePageBuilderStore()
+const fieldDictionaryStore = useFieldDictionaryStore()
 const pageId = computed(() => route.params.pageId)
 const page = computed(() => store.getPageById(pageId.value))
-const pageContainers = computed(() => store.pageContainers[pageId.value]?.items || [])
+const pageContainers = computed(
+  () => store.pageContainers[pageId.value]?.items || [],
+)
+const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
+const dictionaryLabelsLower = computed(
+  () => fieldDictionaryStore.labelMapLower || {},
+)
 
 onMounted(() => {
   store.fetchTemplates()
   store.fetchPages()
+  fieldDictionaryStore.fetchDictionary()
   if (pageId.value) {
     store.fetchPageContainers(pageId.value, true)
   }
@@ -274,7 +476,16 @@ const defaultColumnWidth = 150
 const defaultRowHeight = 48
 const defaultRowHeaderWidth = 200
 const supportedCharts = ['bar', 'line', 'pie']
-const chartPalette = ['#2b6cb0', '#f97316', '#0ea5e9', '#10b981', '#ef4444', '#8b5cf6']
+const chartPalette = [
+  '#2b6cb0',
+  '#f97316',
+  '#0ea5e9',
+  '#10b981',
+  '#ef4444',
+  '#8b5cf6',
+]
+const FILTER_META_VALUE_LIMIT = 20
+const EMPTY_SET = new Set()
 const pageFilterValues = reactive({})
 const filterMap = computed(() =>
   store.filters.reduce((acc, filter) => {
@@ -294,6 +505,8 @@ const hasActivePageFilters = computed(() =>
   }),
 )
 let refreshTimer = null
+const pageRefreshing = ref(false)
+const exportingExcel = ref(false)
 
 function template(templateId) {
   return store.getTemplateById(templateId)
@@ -315,6 +528,13 @@ function containerState(id) {
       view: null,
       chart: null,
       signature: '',
+      meta: {
+        rowTotalsAllowed: new Set(),
+        columnTotalsAllowed: new Set(),
+        metricGroups: [],
+        columnFieldRows: [],
+        rowHeaderTitle: 'Строки',
+      },
     }
   }
   return containerStates[id]
@@ -411,6 +631,37 @@ function templateOptions(container) {
   return tpl?.snapshot?.options || {}
 }
 
+function rowTotalsAllowed(container) {
+  return containerState(container.id).meta?.rowTotalsAllowed || EMPTY_SET
+}
+
+function columnTotalsAllowed(container) {
+  return containerState(container.id).meta?.columnTotalsAllowed || EMPTY_SET
+}
+
+function containerRowTotalHeaders(container) {
+  const state = containerState(container.id)
+  const view = state.view
+  if (!view || !Array.isArray(view.rowTotalHeaders)) return []
+  const allowed = rowTotalsAllowed(container)
+  if (!allowed.size) return []
+  return view.rowTotalHeaders.filter((header) => allowed.has(header.metricId))
+}
+
+function containerRowTotals(container, row) {
+  const allowed = rowTotalsAllowed(container)
+  if (!allowed.size) return []
+  return (row.totals || []).filter((total) => allowed.has(total.metricId))
+}
+
+function containerMetricColumnGroups(container) {
+  return containerState(container.id).meta?.metricGroups || []
+}
+
+function hasMetricGroups(container) {
+  return containerMetricColumnGroups(container).length > 0
+}
+
 function templateFieldMetaMap(template) {
   return new Map(Object.entries(template?.snapshot?.fieldMeta || {}))
 }
@@ -422,14 +673,36 @@ function isTableVisualization(container) {
 
 function shouldShowRowTotals(container) {
   const options = templateOptions(container)
+  const allowed = rowTotalsAllowed(container)
+  if (!allowed.size) return false
   if (options.showRowTotals === undefined) return true
   return Boolean(options.showRowTotals)
 }
 
 function shouldShowColumnTotals(container) {
   const options = templateOptions(container)
+  const allowed = columnTotalsAllowed(container)
+  if (!allowed.size) return false
   if (options.showColumnTotals === undefined) return true
   return Boolean(options.showColumnTotals)
+}
+
+function shouldDisplayColumnTotal(container, metricId) {
+  return columnTotalsAllowed(container).has(metricId)
+}
+
+function containerRowHeaderTitle(container) {
+  return containerState(container.id).meta?.rowHeaderTitle || 'Строки'
+}
+
+function containerColumnFieldRows(container) {
+  return containerState(container.id).meta?.columnFieldRows || []
+}
+
+function containerRowHeaderRowSpan(container) {
+  const metricRows = hasMetricGroups(container) ? 1 : 0
+  const columnRows = containerColumnFieldRows(container).length || 1
+  return metricRows + columnRows
 }
 
 function flattenRowTree(nodes = [], collapseState = {}) {
@@ -487,7 +760,8 @@ function startTableColumnResize(containerId, columnKey, event) {
   const sizing = tableSizing(containerId)
   const startX = event.clientX
   const th = event.currentTarget.closest('th')
-  const initial = sizing.columnWidths[columnKey] || th?.offsetWidth || defaultColumnWidth
+  const initial =
+    sizing.columnWidths[columnKey] || th?.offsetWidth || defaultColumnWidth
   const onMove = (e) => {
     const delta = e.clientX - startX
     sizing.columnWidths[columnKey] = Math.max(80, initial + delta)
@@ -504,7 +778,8 @@ function startTableRowResize(containerId, rowKey, event) {
   const sizing = tableSizing(containerId)
   const startY = event.clientY
   const tr = event.currentTarget.closest('tr')
-  const initial = sizing.rowHeights[rowKey] || tr?.offsetHeight || defaultRowHeight
+  const initial =
+    sizing.rowHeights[rowKey] || tr?.offsetHeight || defaultRowHeight
   const onMove = (e) => {
     const delta = e.clientY - startY
     sizing.rowHeights[rowKey] = Math.max(36, initial + delta)
@@ -521,7 +796,8 @@ function startRowHeaderResize(containerId, event) {
   const sizing = tableSizing(containerId)
   const startX = event.clientX
   const th = event.currentTarget.closest('th')
-  const initial = sizing.rowHeaderWidth || th?.offsetWidth || defaultRowHeaderWidth
+  const initial =
+    sizing.rowHeaderWidth || th?.offsetWidth || defaultRowHeaderWidth
   const onMove = (e) => {
     const delta = e.clientX - startX
     sizing.rowHeaderWidth = Math.max(140, initial + delta)
@@ -565,6 +841,30 @@ function collectTreeKeys(tree = []) {
   return keys
 }
 
+function groupColumnsByLevel(columns, levelIndex) {
+  const cells = []
+  let pointer = 0
+  while (pointer < columns.length) {
+    const value = getColumnLevelValue(columns[pointer], levelIndex)
+    let span = 1
+    while (
+      pointer + span < columns.length &&
+      getColumnLevelValue(columns[pointer + span], levelIndex) === value
+    ) {
+      span += 1
+    }
+    cells.push({ label: value, colspan: span })
+    pointer += span
+  }
+  return cells
+}
+
+function getColumnLevelValue(column, levelIndex) {
+  const level = column.levels?.[levelIndex]
+  if (!level) return 'Итого'
+  return level.value || '—'
+}
+
 function containerRowData(container) {
   const view = containerState(container.id).view
   if (!view) return []
@@ -592,19 +892,19 @@ function includesNodeKey(node, key) {
   return node.children?.some((child) => includesNodeKey(child, key))
 }
 
-async function ensureTemplateData(tpl) {
+async function ensureTemplateData(tpl, options = {}) {
   if (!tpl) {
     throw new Error('Привяжите представление для отображения данных.')
   }
   if (tpl.remoteSource) {
-    return ensureRemoteSourceData(tpl.remoteSource)
+    return ensureRemoteSourceData(tpl.remoteSource, options)
   }
-  return ensureFallbackData(tpl.dataSource)
+  return ensureFallbackData(tpl.dataSource, options)
 }
 
-async function ensureFallbackData(source) {
+async function ensureFallbackData(source, { force = false } = {}) {
   if (!source) throw new Error('В представлении не выбран источник данных.')
-  if (dataCache[source]) return dataCache[source]
+  if (!force && dataCache[source]) return dataCache[source]
   let records = []
   if (source === 'plans') {
     records = await fetchPlanRecords()
@@ -617,12 +917,12 @@ async function ensureFallbackData(source) {
   return records
 }
 
-async function ensureRemoteSourceData(source) {
+async function ensureRemoteSourceData(source, { force = false } = {}) {
   const cacheKey =
     source?.remoteId ||
     source?.id ||
     `${source?.method || 'POST'}:${source?.url || source?.remoteMeta?.URL || ''}`
-  if (cacheKey && dataCache[cacheKey]) {
+  if (!force && cacheKey && dataCache[cacheKey]) {
     return dataCache[cacheKey]
   }
   const request = buildRemoteRequest(source)
@@ -639,9 +939,15 @@ function buildRemoteRequest(source = {}) {
   if (!url) {
     throw new Error('У источника данных отсутствует URL.')
   }
-  const method = String(source?.method || source?.remoteMeta?.Method || 'POST').toUpperCase()
-  const headers = normalizeRemoteHeaders(source?.headers || source?.remoteMeta?.Headers)
-  const body = normalizeRemoteBody(source?.body ?? source?.remoteMeta?.MethodBody)
+  const method = String(
+    source?.method || source?.remoteMeta?.Method || 'POST',
+  ).toUpperCase()
+  const headers = normalizeRemoteHeaders(
+    source?.headers || source?.remoteMeta?.Headers,
+  )
+  const body = normalizeRemoteBody(
+    source?.body ?? source?.remoteMeta?.MethodBody,
+  )
   return { url, method, headers, body }
 }
 
@@ -691,15 +997,15 @@ function matchesGlobalFilters(record, source) {
   if (!activePageFilters.value.length) return true
   return activePageFilters.value.every((filter) => {
     const value = pageFilterValues[filter.key]
-    if (value === undefined || value === null || String(value).trim() === '') return true
-    const binding =
-      filter.bindings?.[source] ||
-      filter.field ||
-      filter.key
+    if (value === undefined || value === null || String(value).trim() === '')
+      return true
+    const binding = filter.bindings?.[source] || filter.field || filter.key
     if (!binding) return true
     const recordValue = normalizeValue(record?.[binding])
     if (!recordValue) return false
-    return recordValue.toLowerCase().includes(String(value).trim().toLowerCase())
+    return recordValue
+      .toLowerCase()
+      .includes(String(value).trim().toLowerCase())
   })
 }
 
@@ -718,29 +1024,39 @@ function filterRecords(records, snapshot, source, containerId) {
   return records.filter((record) => {
     if (!matchesGlobalFilters(record, source)) return false
     if (!matchFieldSet(record, pivot.filters, filterValues)) return false
-    if (!matchFieldSet(record, pivot.rows, dimensionValues.rows || {})) return false
-    if (!matchFieldSet(record, pivot.columns, dimensionValues.columns || {})) return false
+    if (!matchFieldSet(record, pivot.rows, dimensionValues.rows || {}))
+      return false
+    if (!matchFieldSet(record, pivot.columns, dimensionValues.columns || {}))
+      return false
     return true
   })
-}
-
-function metricLabel(metric) {
-  const agg = { count: 'Количество', sum: 'Сумма', avg: 'Среднее' }
-  const title = agg[metric.aggregator] || metric.aggregator
-  return `${title}: ${metric.fieldLabel || metric.fieldKey || 'поле'}`
 }
 
 function prepareMetrics(list = []) {
   return (list || [])
     .filter((metric) => metric?.fieldKey)
-    .map((metric, index) => ({
-      ...metric,
-      id: metric.id || `metric-${index}`,
-      label: metric.label || metricLabel(metric),
-    }))
+    .map((metric, index) => {
+      const displayLabel = metricDisplayLabel(metric)
+      return {
+        ...metric,
+        id: metric.id || `metric-${index}`,
+        label: displayLabel,
+      }
+    })
 }
 
-function buildChartConfig(view, vizType) {
+function metricDisplayLabel(metric = {}) {
+  const title =
+    (typeof metric.title === 'string' && metric.title.trim()) ||
+    (typeof metric.fieldLabel === 'string' && metric.fieldLabel.trim())
+  if (title) return title
+  if (typeof metric.label === 'string' && metric.label.trim()) {
+    return metric.label.trim()
+  }
+  return metric.fieldKey || ''
+}
+
+function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
   if (!supportedCharts.includes(vizType)) return null
   const labels = view.rows.map((row) => row.label || '—')
   let datasets = []
@@ -765,10 +1081,15 @@ function buildChartConfig(view, vizType) {
   }
 
   if (!datasets.length && view.rowTotalHeaders.length) {
-    datasets = view.rowTotalHeaders.map((header, index) => {
+    const allowedHeaders = view.rowTotalHeaders.filter((header) =>
+      rowTotalsAllowed.has(header.metricId),
+    )
+    datasets = allowedHeaders.map((header, index) => {
       const color = chartPalette[index % chartPalette.length]
       const data = view.rows.map((row) => {
-        const total = row.totals.find((item) => item.metricId === header.metricId)
+        const total = row.totals.find(
+          (item) => item.metricId === header.metricId,
+        )
         return typeof total?.value === 'number' ? Number(total.value) : 0
       })
       return {
@@ -787,7 +1108,9 @@ function buildChartConfig(view, vizType) {
 
   if (vizType === 'pie') {
     const pieDataset = datasets[0]
-    const pieColors = labels.map((_, idx) => chartPalette[idx % chartPalette.length])
+    const pieColors = labels.map(
+      (_, idx) => chartPalette[idx % chartPalette.length],
+    )
     return {
       data: {
         labels,
@@ -861,11 +1184,34 @@ async function hydrateContainer(container) {
   state.error = ''
   state.view = null
   state.chart = null
+  state.meta.rowTotalsAllowed = new Set()
+  state.meta.columnTotalsAllowed = new Set()
+  state.meta.metricGroups = []
+  state.meta.columnFieldRows = []
+  state.meta.rowHeaderTitle = 'Строки'
 
   try {
     const records = await ensureTemplateData(tpl)
-    const filtered = filterRecords(records, tpl.snapshot, tpl.dataSource, container.id)
+    const filtered = filterRecords(
+      records,
+      tpl.snapshot,
+      tpl.dataSource,
+      container.id,
+    )
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
+    const rowTotalsAllowed = new Set(
+      metrics
+        .filter((metric) => metric.showRowTotals !== false)
+        .map((metric) => metric.id),
+    )
+    const columnTotalsAllowed = new Set(
+      metrics
+        .filter((metric) => metric.showColumnTotals !== false)
+        .map((metric) => metric.id),
+    )
+    state.meta.rowTotalsAllowed = rowTotalsAllowed
+    state.meta.columnTotalsAllowed = columnTotalsAllowed
+    state.meta.metrics = metrics
     if (!metrics.length) {
       throw new Error('В представлении не выбраны метрики.')
     }
@@ -876,14 +1222,18 @@ async function hydrateContainer(container) {
       metrics,
       fieldMeta: templateFieldMetaMap(tpl),
       headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
-      sorts: tpl.snapshot?.sorts || {},
+      sorts: tpl.snapshot?.options?.sorts || {},
     })
     if (!view || !view.rows.length) {
       state.error = 'Нет данных после применения фильтров.'
       return
     }
     state.view = view
-    state.chart = buildChartConfig(view, tpl.visualization)
+    state.chart = buildChartConfig(view, tpl.visualization, rowTotalsAllowed)
+    const headerMeta = buildHeaderMeta(tpl, metrics, view)
+    state.meta.metricGroups = headerMeta.metricGroups
+    state.meta.columnFieldRows = headerMeta.columnFieldRows
+    state.meta.rowHeaderTitle = headerMeta.rowHeaderTitle
     syncTableSizing(container.id, view)
     const collapseStore = rowCollapseStore(container.id)
     Object.keys(collapseStore).forEach((key) => {
@@ -918,6 +1268,400 @@ function refreshContainers() {
   })
 }
 
+async function refreshPageData() {
+  if (pageRefreshing.value) return
+  const containers = pageContainers.value || []
+  if (!containers.length) {
+    refreshContainers()
+    return
+  }
+  pageRefreshing.value = true
+  try {
+    const grouped = groupContainersByTemplate(containers)
+    const tasks = grouped.map(async ({ tpl, containers: related }) => {
+      const records = await ensureTemplateData(tpl, { force: true })
+      const filtersMeta = buildFilterMetaFromRecords(tpl, records)
+      if (!tpl.snapshot) {
+        tpl.snapshot = {}
+      }
+      tpl.snapshot.filtersMeta = filtersMeta
+      related.forEach((container) => {
+        ensureContainerFilters(container.id, tpl)
+        syncContainerFilterSelections(container.id, filtersMeta)
+      })
+    })
+    await Promise.all(tasks)
+    refreshContainers()
+  } catch (err) {
+    console.warn('Failed to refresh page data', err)
+    alert('Не удалось обновить данные. Попробуйте позже.')
+  } finally {
+    pageRefreshing.value = false
+  }
+}
+
+function collectContainerExportData() {
+  const list = pageContainers.value || []
+  return list
+    .map((container, index) => {
+      const state = containerState(container.id)
+      const view = state.view
+      if (!view) return null
+      const tpl = template(container.templateId)
+      return {
+        title: container.title || tpl?.name || `Контейнер ${index + 1}`,
+        headerMeta: {
+          metricGroups: state.meta.metricGroups || [],
+          columnFieldRows: state.meta.columnFieldRows || [],
+          rowHeaderTitle: state.meta.rowHeaderTitle || 'Строки',
+        },
+        columns: view.columns || [],
+        rows: flattenExportRows(view),
+        showRowTotals: shouldShowRowTotals(container),
+        showColumnTotals: shouldShowColumnTotals(container),
+        rowTotals: containerRowTotalHeaders(container),
+        rowTotalsSet: new Set(rowTotalsAllowed(container)),
+        columnTotalsSet: new Set(columnTotalsAllowed(container)),
+        columnTotals: (view.columns || []).map((column) => column.totalDisplay),
+        grandTotals: view.grandTotals || {},
+      }
+    })
+    .filter(Boolean)
+}
+
+function exportPageAsExcel() {
+  const payload = collectContainerExportData()
+  if (!payload.length) {
+    alert('Нет данных для выгрузки.')
+    return
+  }
+  exportingExcel.value = true
+  try {
+    const html = buildExcelDocument(payload)
+    downloadBlob(html, 'application/vnd.ms-excel', buildExportFilename('xls'))
+  } catch (err) {
+    console.warn('Failed to export Excel', err)
+    alert('Не удалось выгрузить данные в Excel.')
+  } finally {
+    exportingExcel.value = false
+  }
+}
+
+function buildExcelDocument(containers) {
+  const worksheets = containers
+    .map((container, index) => buildWorksheetXml(container, index))
+    .join('')
+  return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?>
+  <Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+    xmlns:o="urn:schemas-microsoft-com:office:office"
+    xmlns:x="urn:schemas-microsoft-com:office:excel"
+    xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+    ${worksheets}
+  </Workbook>`
+}
+
+function buildWorksheetXml(container, index) {
+  const name = sanitizeWorksheetName(container.title || `Sheet ${index + 1}`)
+  const rowsXml = buildWorksheetRowsXml(container)
+  return `<Worksheet ss:Name="${name}"><Table>${rowsXml}</Table></Worksheet>`
+}
+
+function buildWorksheetRowsXml(container) {
+  const {
+    headerMeta,
+    columns,
+    rows,
+    showRowTotals,
+    showColumnTotals,
+    rowTotals,
+    rowTotalsSet,
+    columnTotalsSet,
+    columnTotals,
+    grandTotals,
+  } = container
+  const metricGroups = headerMeta.metricGroups || []
+  const columnRows = headerMeta.columnFieldRows || []
+  const parts = []
+
+  if (metricGroups.length) {
+    const metricCells = [headerMeta.rowHeaderTitle]
+    metricGroups.forEach((group) => {
+      metricCells.push(group.label || '')
+    })
+    if (showRowTotals) {
+      rowTotals.forEach((total) => metricCells.push(total.label || ''))
+    }
+    parts.push(buildWorksheetRow(metricCells))
+  }
+
+  if (columnRows.length) {
+    columnRows.forEach((headerRow, rowIndex) => {
+      const cells = []
+      if (!metricGroups.length && rowIndex === 0) {
+        cells.push(headerMeta.rowHeaderTitle)
+      } else {
+        cells.push('')
+      }
+      headerRow.segments.forEach((segment) => {
+        segment.cells.forEach((cell) => cells.push(cell.label || ''))
+      })
+      if (!metricGroups.length && rowIndex === 0 && showRowTotals) {
+        rowTotals.forEach((total) => cells.push(total.label || ''))
+      }
+      parts.push(buildWorksheetRow(cells))
+    })
+  } else {
+    const headerCells = []
+    headerCells.push(metricGroups.length ? '' : headerMeta.rowHeaderTitle)
+    columns.forEach((column) => headerCells.push(column.label || ''))
+    if (showRowTotals) {
+      rowTotals.forEach((total) => headerCells.push(total.label || ''))
+    }
+    parts.push(buildWorksheetRow(headerCells))
+  }
+
+  rows.forEach((row) => {
+    const cells = [row.label || '']
+    row.cells.forEach((cell) => cells.push(cell.display || ''))
+    if (showRowTotals) {
+      filterRowTotalsForExport(row.totals, rowTotalsSet).forEach((total) => {
+        cells.push(total.display || '')
+      })
+    }
+    parts.push(buildWorksheetRow(cells))
+  })
+
+  if (showColumnTotals) {
+    const totalCells = ['Итого по столбцам']
+    columns.forEach((column, index) => {
+      totalCells.push(
+        columnTotalsSet.has(column.metricId) ? columnTotals[index] || '' : '',
+      )
+    })
+    if (showRowTotals) {
+      rowTotals.forEach((total) => {
+        totalCells.push(grandTotals?.[total.metricId] || '')
+      })
+    }
+    parts.push(buildWorksheetRow(totalCells))
+  }
+  return parts.join('')
+}
+
+function buildWorksheetRow(values = []) {
+  const cells = values
+    .map(
+      (value) =>
+        `<Cell><Data ss:Type="String">${escapeXml(value)}</Data></Cell>`,
+    )
+    .join('')
+  return `<Row>${cells}</Row>`
+}
+
+function sanitizeWorksheetName(name = '') {
+  const forbidden = /[\\/?*[\]:]/g
+  const trimmed = (name || '').replace(forbidden, '').slice(0, 31)
+  return escapeXml(trimmed || 'Sheet')
+}
+
+function escapeXml(value = '') {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function flattenExportRows(view) {
+  if (!view) return []
+  if (view.rowTree && view.rowTree.length) {
+    return flattenRowTree(view.rowTree, {})
+  }
+  return (view.rows || []).map((row) => ({
+    key: row.key,
+    label: row.label,
+    cells: row.cells,
+    totals: row.totals,
+  }))
+}
+
+function filterRowTotalsForExport(totals = [], allowed = new Set()) {
+  if (!allowed || !allowed.size) return []
+  return (totals || []).filter((total) => allowed.has(total.metricId))
+}
+
+function downloadBlob(content, mime, filename) {
+  const blob =
+    content instanceof Blob ? content : new Blob([content], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function buildExportFilename(extension) {
+  const base = page.value?.pageTitle || 'report-page'
+  const safeBase = base.replace(/[^\w\d-_]+/g, '_')
+  const timestamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0]
+  return `${safeBase || 'page'}-${timestamp}.${extension}`
+}
+
+function groupContainersByTemplate(containers = []) {
+  const map = new Map()
+  containers.forEach((container) => {
+    const tpl = template(container.templateId)
+    if (!tpl) return
+    const key = tpl.id || container.templateId
+    if (!map.has(key)) {
+      map.set(key, { tpl, containers: [] })
+    }
+    map.get(key).containers.push(container)
+  })
+  return Array.from(map.values())
+}
+
+function buildFilterMetaFromRecords(tpl, records = []) {
+  const snapshot = tpl?.snapshot
+  if (!snapshot) return []
+  const filters = snapshot?.pivot?.filters || []
+  if (!filters.length) return []
+  const overrides = snapshot?.options?.headerOverrides || {}
+  const fieldMeta = snapshot?.fieldMeta || {}
+  return filters.map((key) => ({
+    key,
+    label: resolveFieldLabel(key, overrides, fieldMeta),
+    values: collectFilterValuesFromRecords(
+      records,
+      key,
+      FILTER_META_VALUE_LIMIT,
+    ),
+  }))
+}
+
+function resolveFieldLabel(key, overrides = {}, fieldMeta = {}) {
+  const normalizedKey = key || ''
+  const override = overrides?.[normalizedKey]
+  if (override && override.trim()) return override.trim()
+  const dictionaryLabel = dictionaryLabelValue(normalizedKey)
+  if (dictionaryLabel) return dictionaryLabel
+  const meta = fieldMeta?.[normalizedKey]
+  if (meta?.label) return meta.label
+  return humanizeKey(normalizedKey)
+}
+
+function dictionaryLabelValue(key) {
+  if (key === null || typeof key === 'undefined') return ''
+  const normalized = String(key).trim()
+  if (!normalized) return ''
+  const direct = dictionaryLabels.value[normalized]
+  if (direct) return direct
+  const lower = normalized.toLowerCase()
+  return dictionaryLabelsLower.value[lower] || ''
+}
+
+function collectFilterValuesFromRecords(
+  records = [],
+  key,
+  limit = FILTER_META_VALUE_LIMIT,
+) {
+  if (!Array.isArray(records) || !records.length) return []
+  const unique = new Set()
+  for (const record of records) {
+    const normalized = normalizeValue(record?.[key])
+    if (!unique.has(normalized)) {
+      unique.add(normalized)
+    }
+    if (unique.size >= limit) break
+  }
+  return Array.from(unique)
+}
+
+function syncContainerFilterSelections(containerId, filtersMeta = []) {
+  const store = containerFilterStore(containerId)
+  const allowedMap = new Map(
+    filtersMeta.map((meta) => [
+      meta.key,
+      new Set((meta.values || []).map((value) => normalizeValue(value))),
+    ]),
+  )
+  Object.keys(store).forEach((key) => {
+    const allowed = allowedMap.get(key)
+    if (!allowed) {
+      delete store[key]
+      return
+    }
+    const current = store[key] || []
+    const filtered = current.filter((value) =>
+      allowed.has(normalizeValue(value)),
+    )
+    if (filtered.length !== current.length) {
+      store[key] = filtered
+    }
+  })
+}
+
+function buildHeaderMeta(tpl, metrics = [], view = null) {
+  const snapshot = tpl?.snapshot || {}
+  const overrides = snapshot?.options?.headerOverrides || {}
+  const fieldMeta = snapshot?.fieldMeta || {}
+  const rowFields = snapshot?.pivot?.rows || []
+  const columnFields = snapshot?.pivot?.columns || []
+  const rowHeaderTitle = rowFields.length
+    ? rowFields
+        .map((key) => resolveFieldLabel(key, overrides, fieldMeta))
+        .join(' › ')
+    : 'Строки'
+  const columns = view?.columns || []
+  const metricGroups =
+    columns.length && metrics.length
+      ? metrics.map((metric) => {
+          const entries = columns.filter(
+            (column) => column.metricId === metric.id,
+          )
+          return {
+            metric,
+            entries,
+            span: entries.length || 1,
+            label: metric.label || metricDisplayLabel(metric),
+          }
+        })
+      : []
+  const columnFieldRows =
+    metricGroups.length && columnFields.length
+      ? columnFields.map((fieldKey, levelIndex) => {
+          const fieldLabel = resolveFieldLabel(fieldKey, overrides, fieldMeta)
+          const isValue = levelIndex === columnFields.length - 1
+          const segments = metricGroups.map((group) => {
+            const entries = group.entries
+            const cells = isValue
+              ? entries.map((column) => ({
+                  label: getColumnLevelValue(column, levelIndex),
+                  colspan: 1,
+                  styleKey: column.key,
+                  isValue: true,
+                }))
+              : groupColumnsByLevel(entries, levelIndex).map((cell) => ({
+                  label: cell.label,
+                  colspan: cell.colspan,
+                  isValue: false,
+                }))
+            return { metricId: group.metric.id, cells }
+          })
+          return { fieldLabel, segments }
+        })
+      : []
+  return {
+    rowHeaderTitle,
+    metricGroups,
+    columnFieldRows,
+  }
+}
+
 function scheduleRefresh() {
   clearTimeout(refreshTimer)
   refreshTimer = setTimeout(() => {
@@ -930,7 +1674,9 @@ function requestContainerRefresh(containerId) {
     clearTimeout(containerRefreshTimers[containerId])
   }
   containerRefreshTimers[containerId] = setTimeout(() => {
-    const container = pageContainers.value.find((item) => item.id === containerId)
+    const container = pageContainers.value.find(
+      (item) => item.id === containerId,
+    )
     if (container) {
       hydrateContainer(container)
     }
@@ -1006,6 +1752,33 @@ function editPage() {
   justify-content: space-between;
   gap: 16px;
   align-items: center;
+}
+.page__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.btn-outline--icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  font-weight: 500;
+}
+.btn-outline--icon .icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.icon-excel::before {
+  content: '⬇';
+}
+.icon-refresh::before {
+  content: '↻';
+}
+.icon-settings::before {
+  content: '⚙';
 }
 .muted {
   color: #6b7280;
@@ -1159,15 +1932,22 @@ function editPage() {
 .pivot-wrapper {
   overflow: auto;
 }
-.column-levels {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
-  color: #475569;
-}
-.column-metric {
+.row-header-title {
   font-weight: 600;
+  text-align: left;
+}
+.column-header-row th {
+  text-align: center;
+}
+.column-field-group {
+  text-align: center;
+  font-weight: 500;
+  position: relative;
+}
+.column-field-value {
+  display: block;
+  font-size: 14px;
+  color: #111827;
 }
 .pivot-table {
   width: 100%;
@@ -1209,10 +1989,6 @@ function editPage() {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-}
-.row-field {
-  color: #6b7280;
-  font-size: 12px;
 }
 .pivot-table .total,
 .pivot-table .grand-total {
