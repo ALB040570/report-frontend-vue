@@ -11,16 +11,18 @@
 
 **Проверки:**
 
-1. В `.env.local` проверь:
-   - `VITE_API_BASE` **без завершающего `/`**.
-   - `VITE_API_DEV_PROXY_BASE` начинается с `/` и совпадает с тем, как фронт ходит (обычно `/api`).
-   - `VITE_RPC_PATH` задан и начинается с `/` (часто `/api`).
+1. В `.env.development` проверь:
+   - `VITE_PROXY_TARGET=http://45.8.116.32` (или другой реальный backend).
+   - Все `VITE_*_API_BASE` и `VITE_FIELD_DICTIONARY_URL` начинаются с `/` (например, `/api`, `/dtj/api/report`, `/dtj/api/objects`).
+   - Значения не содержат двойных `/api/api` и не заканчиваются лишним `/`.
 2. В dev:
-   - Открой вкладку **Network** в браузере: запросы должны идти на `http://localhost:5173/api/...` и проксироваться Vite на `VITE_API_BASE`.
-   - Если запрос ушёл напрямую на чужой хост и поймал CORS → прокси не сработал.
+   - Открой вкладку **Network**: запросы должны идти на `http://localhost:5173/api/...` (тот же origin, где крутится Vite).  
+     Vite проксирует эти пути на `VITE_PROXY_TARGET`.
+   - Если запрос ушёл сразу на `http://45.8.116.32/...` — base URL задан абсолютным и прокси не участвует.
 3. В prod (`npm run build && npm run preview`):
-   - axios должен ходить напрямую на `VITE_API_BASE`.
-   - Если видишь `.../api/api` — убери лишний `/api` из `VITE_API_BASE`.
+   - Предпросмотр тоже использует прокси. В терминале не должно быть `http proxy error: /api (ECONNREFUSED localhost:8080)`.  
+     Если ошибка есть — `VITE_PROXY_TARGET` не задан в `.env.production`.
+   - Если в URL видно `.../api/api` — убери лишний сегмент из `.env`.
 
 ---
 
@@ -28,12 +30,12 @@
 
 **Симптомы:** браузер блокирует запросы, пишет `CORS error` в консоли.
 
-**Причина:** `VITE_API_BASE` указывает на другой origin, а `VITE_API_DEV_PROXY_BASE` не совпадает с путём фронта.
+**Причина:** запросы идут напрямую на `http://45.8.116.32`, минуя Vite proxy (из-за абсолютного `VITE_*_BASE` или пустого `VITE_PROXY_TARGET`).
 
 **Решение:**
 
-- Верни `VITE_API_DEV_PROXY_BASE=/api`.
-- Убедись, что запросы в коде тоже идут на `/api/...`.
+- Оставь в `.env.development` относительные пути (`/api`, `/dtj/api/*`, `/auth`, `/userapi`, `/userinfo`) и задай `VITE_PROXY_TARGET=http://45.8.116.32`.
+- Убедись, что в коде тоже используются относительные пути (например, `api.post('/plan', ...)`).
 - Перезапусти `npm run dev`.
 - Для словаря полей укажи `VITE_FIELD_DICTIONARY_URL=/dtj/api/client` (без origin). В dev абсолютный URL не пройдёт через прокси и браузер заблокирует запрос.
 
@@ -47,9 +49,10 @@
 
 **Проверки:**
 
-1. Переменная `VITE_AUTH_LOGIN_PATH` (в `.env.local`) должна начинаться с `/`.
-   - По умолчанию: `/auth/login`.
-   - Если сервер ждёт логин внутри API, укажи `/api/auth/login` или `/dtj/ind/api/auth/login`.
+1. Переменные `VITE_AUTH_BASE_URL` и `VITE_AUTH_DEV_PROXY_BASE`:
+   - В dev: `VITE_AUTH_BASE_URL=/`, `VITE_AUTH_DEV_PROXY_BASE=/auth`, чтобы Vite проксировал `/auth/*` на `VITE_PROXY_TARGET`.
+   - В prod: `VITE_AUTH_BASE_URL` может быть `/` (если фронт и бэк на одном домене) либо абсолютным `http://45.8.116.32` (если нужно идти напрямую).
+   - Если backend ожидает логин по другому пути (например `/dtj/nsi/auth/login`), добавь этот префикс в `VITE_AUTH_BASE_URL`.
 2. Проверь ответ бэкенда: в текущем коде login ждёт текстовое `"ok"`.
    - Если сервер возвращает JSON → поправь бэкенд или адаптер логина.
 
@@ -59,12 +62,13 @@
 
 **Симптомы:** при вызове функций вида `rpc('loadTypesObjects', {...})` приходит ошибка «unknown method».
 
-**Причина:** `VITE_RPC_PATH` указывает не туда.
+**Причина:** базовый URL (`VITE_REPORT_API_BASE`, `VITE_PLAN_API_BASE`, `VITE_INSPECTION_API_BASE`, `VITE_OBJECTS_API_BASE` и т.п.) указывает не на тот endpoint.
 
 **Решение:**
 
-- В dev: оставь `VITE_RPC_PATH=/api`.
-- В prod: убедись, что `VITE_API_BASE` + `VITE_RPC_PATH` совпадает с реальным RPC-эндпоинтом.
+- В dev: значения должны начинаться с `/dtj/...` (без протокола), чтобы запросы шли через прокси.
+- В prod: если фронт живёт на том же домене, можно оставить относительные пути. Если фронт будет на другом хосте — укажи полный `http://45.8.116.32/dtj/...`.
+- Сверь, что путь совпадает с тем, что ждёт backend (например, `report/loadReportConfiguration` должен приходить на `/dtj/api/report`).
 
 ---
 
@@ -101,6 +105,21 @@
 - **Проверить login:** в `src/features/auth/model/login.ts` убедись, что путь совпадает с `.env`.
 - **Логи Vite:** при старте `npm run dev` в консоли видно, куда проксируются запросы `/api`.
 - **Network → Headers:** смотри `Request URL` и `Response`.
+
+---
+
+### 8. Проверка prod сборки локально
+
+**Симптомы:** непонятно, заработает ли собранный `dist/` на 45.8.116.32, а на `npm run preview` запросы бьют в `localhost:8080`.
+
+**Решение:**
+
+1. В `.env.production` оставь относительные пути (`/api`, `/dtj/api/*`, `/auth`, `/userapi`, `/userinfo`) и обязательно задай `VITE_PROXY_TARGET=http://45.8.116.32`.
+   - Front в prod обращается к тем же путям, что и backend, а Vite `dev`/`preview` проксируют их на указанный хост, поэтому CORS не возникает.
+2. Выполни `npm run build && npm run preview -- --host 0.0.0.0 --port 4173` и открой `http://localhost:4173/`.
+   - В терминале не должно быть `http proxy error: /api (ECONNREFUSED localhost:8080)`. Если ошибки есть — проверь `VITE_PROXY_TARGET`.
+3. Авторизуйся и проверь страницы: все запросы `/api`, `/dtj/*`, `/auth`, `/userapi`, `/userinfo` будут ходить на реальный backend через прокси.
+4. После проверки можно копировать `dist/` на сервер — там эти относительные пути будут обрабатываться самим backend'ом, поэтому дополнительных прокси не требуется.
 
 ---
 
