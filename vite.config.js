@@ -8,6 +8,7 @@ const proxyPaths = ['/api', '/auth', '/userapi', '/dtj', '/userinfo']
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const target = env.VITE_PROXY_TARGET || 'http://localhost:8080'
+  const basePath = env.VITE_BASE_PATH || '/'
 
   const serverProxy = proxyPaths.reduce((acc, prefix) => {
     acc[prefix] = {
@@ -19,6 +20,7 @@ export default defineConfig(({ mode }) => {
   }, {})
 
   return {
+    base: basePath,
     plugins: [vue()],
     server: {
       port: 5173,
