@@ -1,5 +1,5 @@
 <template>
-  <section class="page" v-if="page">
+  <section v-if="page" class="page">
     <header class="page__header">
       <div>
         <h1>{{ page.pageTitle }}</h1>
@@ -51,8 +51,8 @@
         <button
           class="btn-outline btn-sm"
           type="button"
-          @click="resetPageFilters"
           :disabled="!hasActivePageFilters"
+          @click="resetPageFilters"
         >
           Сбросить фильтры
         </button>
@@ -78,10 +78,10 @@
             {{ dataSourceLabel(template(container.templateId)) }}
           </span>
         </header>
-        <p class="muted" v-if="template(container.templateId)">
+        <p v-if="template(container.templateId)" class="muted">
           {{ template(container.templateId).description || 'Без описания' }}
         </p>
-        <p class="muted" v-else>
+        <p v-else class="muted">
           Привяжите представление, чтобы контейнер мог отобразить данные.
         </p>
 
@@ -100,10 +100,10 @@
                 <button
                   class="btn-link"
                   type="button"
-                  @click="resetContainerFilter(container.id, filter.key)"
                   :disabled="
                     !containerFilterValues[container.id]?.[filter.key]?.length
                   "
+                  @click="resetContainerFilter(container.id, filter.key)"
                 >
                   Очистить
                 </button>
@@ -129,7 +129,7 @@
             {{ containerState(container.id).error }}
           </div>
           <template v-else-if="containerState(container.id).view">
-            <div class="pivot-wrapper" v-if="isTableVisualization(container)">
+            <div v-if="isTableVisualization(container)" class="pivot-wrapper">
               <table class="pivot-table">
                 <thead>
                   <tr v-if="hasMetricGroups(container)" class="metric-header">

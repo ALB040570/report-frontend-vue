@@ -49,9 +49,9 @@
           <button
             class="icon-btn"
             type="button"
-            @click="previewView(view)"
             aria-label="Открыть представление"
             title="Открыть представление"
+            @click="previewView(view)"
           >
             <span class="icon icon-eye" />
           </button>
@@ -59,27 +59,27 @@
             class="icon-btn"
             type="button"
             :class="{ 'is-active': detailsId === view.id }"
-            @click="toggleDetails(view.id)"
             :aria-label="
               detailsId === view.id ? 'Скрыть детали' : 'Показать детали'
             "
             :title="detailsId === view.id ? 'Скрыть детали' : 'Показать детали'"
+            @click="toggleDetails(view.id)"
           >
             <span class="icon icon-info" />
           </button>
           <button
             class="icon-btn"
             type="button"
-            @click="startEdit(view)"
             aria-label="Редактировать представление"
+            @click="startEdit(view)"
           >
             <span class="icon icon-edit" />
           </button>
           <button
             class="icon-btn icon-btn--danger"
             type="button"
-            @click="removeView(view)"
             aria-label="Удалить представление"
+            @click="removeView(view)"
           >
             <span class="icon icon-trash" />
           </button>

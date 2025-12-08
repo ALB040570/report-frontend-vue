@@ -4,9 +4,15 @@ import { DEFAULT_PARAMETER_PAYLOAD } from '@/shared/api/parameter'
 import { callReportMethod } from '@/shared/api/report'
 import { fetchMethodTypeRecords } from '@/shared/api/objects'
 import { fetchCurrentUserRecord, fetchPersonnelInfo } from '@/shared/api/user'
+import {
+  normalizeJoinList,
+  parseJoinConfig,
+  serializeJoinConfig,
+} from '@/shared/lib/sourceJoins'
 
 const STORAGE_KEY = 'report-data-sources'
 const USER_CONTEXT_KEY = 'report-user-context'
+const envFallbackUserContext = resolveEnvFallbackUserContext()
 
 const defaultSources = [
   {
@@ -27,6 +33,7 @@ const defaultSources = [
     supportsPivot: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    joins: [],
   },
   {
     id: 'source-parameters',
@@ -46,26 +53,30 @@ const defaultSources = [
     supportsPivot: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    joins: [],
   },
 ]
 
 function loadSources() {
-  if (typeof window === 'undefined') return structuredClone(defaultSources)
+  if (typeof window === 'undefined') {
+    return structuredClone(defaultSources).map(applyJoinDefaults)
+  }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length) return parsed
+      if (Array.isArray(parsed) && parsed.length) return parsed.map(applyJoinDefaults)
     }
   } catch (err) {
     console.warn('Failed to load data sources', err)
   }
-  return structuredClone(defaultSources)
+  return structuredClone(defaultSources).map(applyJoinDefaults)
 }
 
 function persistSources(list) {
   if (typeof window === 'undefined') return
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list))
+  const normalized = Array.isArray(list) ? list.map(applyJoinDefaults) : []
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized))
 }
 
 function loadUserContext() {
@@ -84,7 +95,7 @@ function loadUserContext() {
 
 function persistUserContext(context) {
   if (typeof window === 'undefined') return
-  if (!context) {
+  if (!context || context.__fallback) {
     window.localStorage.removeItem(USER_CONTEXT_KEY)
     return
   }
@@ -158,6 +169,7 @@ export const useDataSourcesStore = defineStore('dataSources', {
       base.headers = base.headers || { 'Content-Type': 'application/json' }
       base.supportsPivot = payload.supportsPivot !== false
       base.updatedAt = new Date().toISOString()
+      base.joins = normalizeJoinList(base.joins || existing?.joins || [])
       if (!base.createdAt) {
         base.createdAt = base.updatedAt
       }
@@ -232,6 +244,11 @@ export const useDataSourcesStore = defineStore('dataSources', {
           persistUserContext(external)
           return this.userContext
         }
+        const fallback = cloneEnvFallbackUserContext()
+        if (fallback) {
+          this.userContext = fallback
+          return this.userContext
+        }
       }
       if (this._userContextPromise && !force) {
         await this._userContextPromise
@@ -269,6 +286,10 @@ export const useDataSourcesStore = defineStore('dataSources', {
       }
       if (force) {
         await runner()
+        const fallback = cloneEnvFallbackUserContext()
+        if (!hasValidUserContext(this.userContext) && fallback) {
+          this.userContext = fallback
+        }
         return this.userContext
       }
       this._userContextPromise = runner()
@@ -276,6 +297,12 @@ export const useDataSourcesStore = defineStore('dataSources', {
         await this._userContextPromise
       } finally {
         this._userContextPromise = null
+      }
+      if (!hasValidUserContext(this.userContext)) {
+        const fallback = cloneEnvFallbackUserContext()
+        if (fallback) {
+          this.userContext = fallback
+        }
       }
       return this.userContext
     },
@@ -296,6 +323,27 @@ export const useDataSourcesStore = defineStore('dataSources', {
     },
   },
 })
+
+function cloneEnvFallbackUserContext() {
+  if (!envFallbackUserContext) return null
+  return { ...envFallbackUserContext }
+}
+
+function resolveEnvFallbackUserContext() {
+  const objUser = toNumericId(import.meta.env.VITE_FAKE_OBJ_USER)
+  const pvUser = toNumericId(import.meta.env.VITE_FAKE_PV_USER)
+  if (!Number.isFinite(objUser) || !Number.isFinite(pvUser)) return null
+  const idUser =
+    toNumericId(import.meta.env.VITE_FAKE_USER_ID) || objUser || pvUser || null
+  const fullName = (import.meta.env.VITE_FAKE_USER_FULLNAME || '').trim()
+  return {
+    idUser,
+    objUser,
+    pvUser,
+    fullNameUser: fullName,
+    __fallback: true,
+  }
+}
 
 function extractRecords(payload) {
   if (!payload || typeof payload !== 'object') return []
@@ -334,6 +382,7 @@ function normalizeRemoteSource(entry = {}, index = 0) {
     createdAt: entry.createdAt || new Date().toISOString(),
     updatedAt: entry.updatedAt || new Date().toISOString(),
     remoteMeta: buildRemoteMeta(entry),
+    joins: parseJoinConfig(entry.joinConfig || entry.JoinConfig),
   }
 }
 
@@ -388,6 +437,7 @@ function buildRemoteMeta(entry = {}) {
     pvUser: entry.pvUser,
     fullNameUser: entry.fullNameUser,
     URL: entry.URL || entry.url,
+    joinConfig: entry.joinConfig || entry.JoinConfig || entry.joinPayload,
   }
 }
 
@@ -424,6 +474,7 @@ function buildRemotePayload(source, methodTypes = [], userContext = null) {
     pvUser: pickUserValue(userContext?.pvUser, meta.pvUser),
     fullNameUser: userContext?.fullNameUser || meta.fullNameUser || '',
     URL: source.url || meta.URL || '',
+    joinConfig: serializeJoinConfig(source.joins || []),
   }
 }
 
@@ -482,4 +533,11 @@ function hasValidUserContext(context) {
     Number.isFinite(Number(context.objUser)) &&
     Number.isFinite(Number(context.pvUser))
   )
+}
+
+function applyJoinDefaults(source = {}) {
+  if (!source) return source
+  const next = { ...source }
+  next.joins = normalizeJoinList(source.joins || [])
+  return next
 }

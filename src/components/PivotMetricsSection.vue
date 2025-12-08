@@ -13,7 +13,7 @@
       </n-button>
     </header>
 
-    <div class="metrics-list" v-if="metrics.length">
+    <div v-if="metrics.length" class="metrics-list">
       <article v-for="(metric, index) in metrics" :key="metric.id" class="metric-card">
         <div class="metric-card__row">
           <label class="metric-field">
