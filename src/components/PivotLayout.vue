@@ -66,6 +66,7 @@
           :fields="fields"
           :aggregators="aggregatorOptions"
           :get-field-label="getFieldLabel"
+          :metric-tokens="metricTokens"
           @add="$emit('add-metric')"
           @move="$emit('move-metric', $event)"
           @remove="$emit('remove-metric', $event)"
@@ -137,6 +138,10 @@ defineProps({
     default: null,
   },
   aggregatorOptions: {
+    type: Array,
+    default: () => [],
+  },
+  metricTokens: {
     type: Array,
     default: () => [],
   },

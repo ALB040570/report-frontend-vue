@@ -9,22 +9,31 @@ const FALLBACK_AGGREGATORS = {
   count: { label: 'Количество', fvFieldVal: 1350, pvFieldVal: 1570 },
   sum: { label: 'Сумма', fvFieldVal: 1349, pvFieldVal: 1569 },
   avg: { label: 'Среднее', fvFieldVal: 1351, pvFieldVal: 1571 },
+  value: { label: 'Значение', fvFieldVal: 0, pvFieldVal: 0 },
 }
 
 export async function fetchReportViewTemplates() {
-  const [presentationsRaw, configsRaw, sourcesRaw, vizRecords, aggRecords, linkRecords] =
-    await Promise.all([
-      loadReportPresentations(),
-      loadReportConfigurations(),
-      loadReportSources(),
-      fetchFactorValues('Prop_VisualTyp'),
-      fetchFactorValues('Prop_FieldVal'),
-      loadPresentationLinks(),
-    ])
+  const [
+    presentationsRaw,
+    configsRaw,
+    sourcesRaw,
+    vizRecords,
+    aggRecords,
+    linkRecords,
+  ] = await Promise.all([
+    loadReportPresentations(),
+    loadReportConfigurations(),
+    loadReportSources(),
+    fetchFactorValues('Prop_VisualTyp'),
+    fetchFactorValues('Prop_FieldVal'),
+    loadPresentationLinks(),
+  ])
 
   const visualizationMap = buildVisualizationLookup(vizRecords)
   const aggregatorMap = buildAggregatorMap(aggRecords)
-  const sources = sourcesRaw.map((entry, index) => normalizeSource(entry, index))
+  const sources = sourcesRaw.map((entry, index) =>
+    normalizeSource(entry, index),
+  )
   const sourceMap = new Map(
     sources.map((source) => [source.remoteId || source.id, source]),
   )
@@ -41,9 +50,7 @@ export async function fetchReportViewTemplates() {
 
   return presentations.map((presentation) => {
     const config = configMap.get(presentation.parentId) || null
-    const source = config
-      ? sourceMap.get(config.parentId) || null
-      : null
+    const source = config ? sourceMap.get(config.parentId) || null : null
     const link =
       linkMap.get(toStableId(presentation.remoteId)) ||
       linkMap.get(toStableId(presentation.id)) ||
@@ -186,36 +193,81 @@ function normalizeSource(entry = {}, index = 0) {
 }
 
 function normalizeMetrics(list = [], metricSettings = [], aggregatorMap) {
-  if (!Array.isArray(list)) return []
-  return list
-    .map((entry, index) => {
-      const fieldKey = entry?.FieldName || entry?.Field || entry?.FieldLabel || ''
-      if (!fieldKey) return null
-      const saved = (metricSettings || []).find(
-        (item) =>
-          toNumericId(item?.remoteId) === toNumericId(entry?.idMetricsComplex) ||
-          item?.fieldKey === fieldKey,
-      )
-      const aggregator =
-        saved?.aggregator ||
-        resolveAggregatorKeyFromRemote(
-          entry?.fvFieldVal,
-          entry?.pvFieldVal,
-          aggregatorMap,
-        ) || 'sum'
-      return {
-        id: entry?.idMetricsComplex
-          ? String(entry.idMetricsComplex)
-          : createLocalId(`metric-${index}`),
-        fieldKey,
-        aggregator,
-        fieldLabel: saved?.title || entry?.FieldLabel || fieldKey,
-        showRowTotals: saved?.showRowTotals !== false,
-        showColumnTotals: saved?.showColumnTotals !== false,
-        remoteMeta: entry || {},
+  const remoteList = Array.isArray(list) ? list : []
+  const settings = Array.isArray(metricSettings) ? metricSettings : []
+  const result = []
+  const remoteById = new Map(
+    remoteList.map((entry) => [toNumericId(entry?.idMetricsComplex), entry]),
+  )
+  const remoteByField = new Map(
+    remoteList.map((entry) => [entry?.FieldName || entry?.Field, entry]),
+  )
+  const usedRemote = new Set()
+  if (settings.length) {
+    settings.forEach((saved, index) => {
+      if (saved?.type === 'formula') {
+        result.push({
+          id: saved.id || createLocalId(`metric-${index}`),
+          type: 'formula',
+          title: saved.title || '',
+          enabled: saved.enabled !== false,
+          showRowTotals: saved.showRowTotals !== false,
+          showColumnTotals: saved.showColumnTotals !== false,
+          expression: saved.expression || '',
+          precision: Number.isFinite(saved.precision)
+            ? Number(saved.precision)
+            : 2,
+        })
+        return
+      }
+      const entry =
+        (saved?.remoteId && remoteById.get(toNumericId(saved.remoteId))) ||
+        (saved?.fieldKey && remoteByField.get(saved.fieldKey))
+      if (entry) {
+        usedRemote.add(entry)
+        result.push(buildNormalizedMetric(entry, saved, aggregatorMap, index))
       }
     })
-    .filter(Boolean)
+  }
+  remoteList.forEach((entry, index) => {
+    if (usedRemote.has(entry)) return
+    result.push(buildNormalizedMetric(entry, null, aggregatorMap, index))
+  })
+  return result
+}
+
+function buildNormalizedMetric(
+  entry = {},
+  saved = null,
+  aggregatorMap,
+  index = 0,
+) {
+  const fieldKey =
+    entry?.FieldName ||
+    entry?.Field ||
+    entry?.FieldLabel ||
+    saved?.fieldKey ||
+    ''
+  const aggregator =
+    saved?.aggregator ||
+    resolveAggregatorKeyFromRemote(
+      entry?.fvFieldVal,
+      entry?.pvFieldVal,
+      aggregatorMap,
+    ) ||
+    'sum'
+  return {
+    id: entry?.idMetricsComplex
+      ? String(entry.idMetricsComplex)
+      : saved?.id || createLocalId(`metric-${index}`),
+    type: 'base',
+    fieldKey,
+    aggregator,
+    fieldLabel: saved?.title || entry?.FieldLabel || fieldKey,
+    showRowTotals: saved?.showRowTotals !== false,
+    showColumnTotals: saved?.showColumnTotals !== false,
+    remoteMeta: entry || {},
+  }
 }
 
 function resolveVisualizationType(entry, lookup) {
@@ -223,7 +275,9 @@ function resolveVisualizationType(entry, lookup) {
   if (key && lookup.has(key)) {
     return lookup.get(key).type
   }
-  return resolveVisualizationChartType({ name: entry?.nameVisualTyp || entry?.VisualTypName })
+  return resolveVisualizationChartType({
+    name: entry?.nameVisualTyp || entry?.VisualTypName,
+  })
 }
 
 function buildVisualizationLookup(records = []) {
@@ -237,7 +291,9 @@ function buildVisualizationLookup(records = []) {
         record?.FieldVal ??
         record?.id,
     )
-    const pv = toNumericId(record?.pvVisualTyp ?? record?.pv ?? record?.pvFieldVal)
+    const pv = toNumericId(
+      record?.pvVisualTyp ?? record?.pv ?? record?.pvFieldVal,
+    )
     const label = formatVisualizationLabel(record, index)
     if (fv === null) return
     map.set(buildVisualizationKey(fv, pv), {
@@ -272,24 +328,36 @@ function buildAggregatorMap(records = []) {
         0,
     }
   })
-  return Object.keys(map).length ? map : FALLBACK_AGGREGATORS
+  if (!Object.keys(map).length) {
+    return FALLBACK_AGGREGATORS
+  }
+  Object.entries(FALLBACK_AGGREGATORS).forEach(([key, meta]) => {
+    if (!map[key]) {
+      map[key] = meta
+    }
+  })
+  return map
 }
 
 function resolveAggregatorKeyFromRemote(fv, pv, map = FALLBACK_AGGREGATORS) {
   const numericFv = toNumericId(fv)
   const numericPv = toNumericId(pv)
   const match = Object.entries(map).find(
-    ([, meta]) => meta.fvFieldVal === numericFv && meta.pvFieldVal === numericPv,
+    ([, meta]) =>
+      meta.fvFieldVal === numericFv && meta.pvFieldVal === numericPv,
   )
   return match ? match[0] : 'sum'
 }
 
 function detectAggregatorKey(record = {}) {
-  const rawName = String(record?.name || record?.title || '').trim().toLowerCase()
+  const rawName = String(record?.name || record?.title || '')
+    .trim()
+    .toLowerCase()
   if (!rawName) return null
   if (rawName.includes('колич') || rawName.includes('count')) return 'count'
   if (rawName.includes('сред') || rawName.includes('avg')) return 'avg'
   if (rawName.includes('сум') || rawName.includes('sum')) return 'sum'
+  if (rawName.includes('знач') || rawName.includes('value')) return 'value'
   return null
 }
 

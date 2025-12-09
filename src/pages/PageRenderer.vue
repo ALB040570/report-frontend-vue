@@ -376,7 +376,7 @@
                         {{
                           containerState(container.id).view.grandTotals[
                             total.metricId
-                          ]
+                          ]?.display || '—'
                         }}
                       </td>
                     </template>
@@ -414,7 +414,10 @@
 <script setup>
 import { computed, reactive, ref, watch, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
+import {
+  usePageBuilderStore,
+  resolveCommonContainerFieldKeys,
+} from '@/shared/stores/pageBuilder'
 import { fetchPlanRecords } from '@/shared/api/plan'
 import { fetchParameterRecords } from '@/shared/api/parameter'
 import { sendDataSourceRequest } from '@/shared/api/dataSource'
@@ -423,6 +426,8 @@ import {
   buildPivotView,
   normalizeValue,
   humanizeKey,
+  augmentPivotViewWithFormulas,
+  filterPivotViewByVisibility,
 } from '@/shared/lib/pivotUtils'
 import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
@@ -1047,18 +1052,31 @@ function filterRecords(records, snapshot, source, containerId) {
 
 function prepareMetrics(list = []) {
   return (list || [])
-    .filter((metric) => metric?.fieldKey)
+    .filter((metric) =>
+      metric?.type === 'formula'
+        ? Boolean(metric.expression && String(metric.expression).trim())
+        : Boolean(metric.fieldKey),
+    )
     .map((metric, index) => {
       const displayLabel = metricDisplayLabel(metric)
       return {
         ...metric,
         id: metric.id || `metric-${index}`,
+        type: metric.type || 'base',
         label: displayLabel,
+        enabled: metric.enabled !== false,
       }
     })
 }
 
 function metricDisplayLabel(metric = {}) {
+  if (metric.type === 'formula') {
+    return (
+      (typeof metric.title === 'string' && metric.title.trim()) ||
+      metric.label ||
+      'Формула'
+    )
+  }
   const title =
     (typeof metric.title === 'string' && metric.title.trim()) ||
     (typeof metric.fieldLabel === 'string' && metric.fieldLabel.trim())
@@ -1216,12 +1234,18 @@ async function hydrateContainer(container) {
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
     const rowTotalsAllowed = new Set(
       metrics
-        .filter((metric) => metric.showRowTotals !== false)
+        .filter(
+          (metric) =>
+            metric.showRowTotals !== false && metric.enabled !== false,
+        )
         .map((metric) => metric.id),
     )
     const columnTotalsAllowed = new Set(
       metrics
-        .filter((metric) => metric.showColumnTotals !== false)
+        .filter(
+          (metric) =>
+            metric.showColumnTotals !== false && metric.enabled !== false,
+        )
         .map((metric) => metric.id),
     )
     state.meta.rowTotalsAllowed = rowTotalsAllowed
@@ -1230,22 +1254,43 @@ async function hydrateContainer(container) {
     if (!metrics.length) {
       throw new Error('В представлении не выбраны метрики.')
     }
-    const view = buildPivotView({
-      records: filtered,
-      rows: tpl.snapshot?.pivot?.rows || [],
-      columns: tpl.snapshot?.pivot?.columns || [],
-      metrics,
-      fieldMeta: templateFieldMetaMap(tpl),
-      headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
-      sorts: tpl.snapshot?.options?.sorts || {},
-    })
+    const baseMetrics = metrics.filter((metric) => metric.type !== 'formula')
+    const hasBaseMetric = baseMetrics.length > 0
+    if (!hasBaseMetric) {
+      throw new Error('Добавьте хотя бы одну базовую метрику в представлении.')
+    }
+    let baseView
+    try {
+      baseView = buildPivotView({
+        records: filtered,
+        rows: tpl.snapshot?.pivot?.rows || [],
+        columns: tpl.snapshot?.pivot?.columns || [],
+        metrics: baseMetrics,
+        fieldMeta: templateFieldMetaMap(tpl),
+        headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
+        sorts: tpl.snapshot?.options?.sorts || {},
+      })
+    } catch (err) {
+      if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
+        throw new Error(
+          `Метрика с типом «Значение» использует несколько записей на одну ячейку. Скорректируйте конфигурацию на вкладке «Данные».`,
+        )
+      }
+      throw err
+    }
+    const augmented = augmentPivotViewWithFormulas(baseView, metrics)
+    const view = filterPivotViewByVisibility(augmented, metrics)
     if (!view || !view.rows.length) {
       state.error = 'Нет данных после применения фильтров.'
       return
     }
     state.view = view
     state.chart = buildChartConfig(view, tpl.visualization, rowTotalsAllowed)
-    const headerMeta = buildHeaderMeta(tpl, metrics, view)
+    const headerMeta = buildHeaderMeta(
+      tpl,
+      metrics.filter((metric) => metric.enabled !== false),
+      view,
+    )
     state.meta.metricGroups = headerMeta.metricGroups
     state.meta.columnFieldRows = headerMeta.columnFieldRows
     state.meta.rowHeaderTitle = headerMeta.rowHeaderTitle
@@ -1455,7 +1500,7 @@ function buildWorksheetRowsXml(container) {
     })
     if (showRowTotals) {
       rowTotals.forEach((total) => {
-        totalCells.push(grandTotals?.[total.metricId] || '')
+        totalCells.push(grandTotals?.[total.metricId]?.display || '')
       })
     }
     parts.push(buildWorksheetRow(totalCells))

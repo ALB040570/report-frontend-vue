@@ -538,6 +538,7 @@
               :columns="pivotConfig.columns"
               :filters="pivotConfig.filters"
               :metrics="pivotMetrics"
+              :metric-tokens="formulaMetricTokens"
               :header-overrides="headerOverrides"
               :filter-values="filterValues"
               :row-value-filters="dimensionValueFilters.rows"
@@ -1032,6 +1033,9 @@ import {
   humanizeKey,
   normalizeValue,
   formatValue,
+  augmentPivotViewWithFormulas,
+  extractFormulaMetricIds,
+  filterPivotViewByVisibility,
 } from '@/shared/lib/pivotUtils'
 import {
   createJoinTemplate,
@@ -1069,6 +1073,8 @@ const joinTypeOptions = [
   { label: 'LEFT (все строки основного источника)', value: 'left' },
   { label: 'INNER (только совпадения)', value: 'inner' },
 ]
+const FORMULA_ALLOWED_CHARS = /^[0-9+\-*/().\s]*$/
+const FORMULA_TOKEN_REGEX = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g
 const sourceDraft = reactive(createBlankSource())
 const rawBodyError = ref('')
 const structuredBodyAvailable = ref(false)
@@ -1362,6 +1368,7 @@ const FALLBACK_AGGREGATORS = {
   count: { label: 'Количество', fvFieldVal: 1350, pvFieldVal: 1570 },
   sum: { label: 'Сумма', fvFieldVal: 1349, pvFieldVal: 1569 },
   avg: { label: 'Среднее', fvFieldVal: 1351, pvFieldVal: 1571 },
+  value: { label: 'Значение', fvFieldVal: 0, pvFieldVal: 0 },
 }
 const aggregatorRecords = ref([])
 const aggregatorMap = computed(() => {
@@ -1377,7 +1384,15 @@ const aggregatorMap = computed(() => {
         toNumericValue(record.pv) || FALLBACK_AGGREGATORS[key]?.pvFieldVal || 0,
     }
   })
-  return Object.keys(map).length ? map : FALLBACK_AGGREGATORS
+  if (!Object.keys(map).length) {
+    return FALLBACK_AGGREGATORS
+  }
+  Object.entries(FALLBACK_AGGREGATORS).forEach(([key, meta]) => {
+    if (!map[key]) {
+      map[key] = meta
+    }
+  })
+  return map
 })
 const aggregatorOptions = computed(() =>
   Object.entries(aggregatorMap.value).map(([value, meta]) => ({
@@ -1875,6 +1890,7 @@ watch(
       syncSortStore(pivotSortState[section], pivotConfig[section])
     })
     pivotMetrics.forEach((metric) => {
+      if (metric.type === 'formula') return
       if (metric.fieldKey && !validKeys.includes(metric.fieldKey)) {
         metric.fieldKey = ''
       }
@@ -1945,6 +1961,7 @@ watch(
     if (
       fields.length &&
       pivotMetrics.length === 1 &&
+      pivotMetrics[0].type !== 'formula' &&
       !pivotMetrics[0].fieldKey
     ) {
       const firstNumericField = fields.find((field) => field.type === 'number')
@@ -1985,6 +2002,7 @@ watch(
 watch(
   pivotMetrics,
   () => {
+    ensureMetricExists()
     pivotMetricsVersion.value += 1
   },
   { deep: true },
@@ -1997,11 +2015,18 @@ const fieldsMap = computed(() => {
   }, new Map())
 })
 
-const activeMetrics = computed(() => {
+const preparedMetrics = computed(() => {
   pivotMetricsVersion.value
   return pivotMetrics
-    .filter((metric) => metric.enabled !== false)
     .map((metric) => {
+      if (metric.type === 'formula') {
+        const label = metric.title?.trim() || 'Формула'
+        return {
+          ...metric,
+          label,
+          field: null,
+        }
+      }
       const field = fieldsMap.value.get(metric.fieldKey)
       if (!field || !metric.fieldKey) return null
       const baseLabel = metric.title?.trim()
@@ -2013,8 +2038,30 @@ const activeMetrics = computed(() => {
         field,
       }
     })
-    .filter(Boolean)
+    .filter((metric) => {
+      if (!metric) return false
+      if (metric.type === 'formula') {
+        return Boolean(metric.expression?.trim())
+      }
+      return Boolean(metric.fieldKey)
+    })
 })
+
+const computationBaseMetrics = computed(() =>
+  preparedMetrics.value.filter((metric) => metric.type !== 'formula'),
+)
+const computationFormulaMetrics = computed(() =>
+  preparedMetrics.value.filter((metric) => metric.type === 'formula'),
+)
+const visibleMetrics = computed(() =>
+  preparedMetrics.value.filter((metric) => metric.enabled !== false),
+)
+const formulaMetricTokens = computed(() =>
+  computationBaseMetrics.value.map((metric) => ({
+    id: metric.id,
+    label: metric.label,
+  })),
+)
 
 function matchesFieldValues(record, fieldsList, store) {
   return fieldsList.every((fieldKey) => {
@@ -2059,34 +2106,65 @@ const pivotWarnings = computed(() => {
   if (!pivotConfig.rows.length && !pivotConfig.columns.length) {
     messages.push('Добавьте хотя бы одно поле в строки или столбцы.')
   }
-  if (!activeMetrics.value.length) {
+  if (!preparedMetrics.value.length) {
     messages.push('Добавьте хотя бы одну метрику.')
   }
-  activeMetrics.value.forEach((metric) => {
-    if (metric.field.type !== 'number' && metric.aggregator !== 'count') {
+  if (!visibleMetrics.value.length) {
+    messages.push('Включите отображение хотя бы одной метрики.')
+  }
+  if (!computationBaseMetrics.value.length) {
+    messages.push('Минимум одна метрика должна ссылаться на поле источника.')
+  }
+  computationBaseMetrics.value.forEach((metric) => {
+    if (
+      metric.field?.type !== 'number' &&
+      metric.aggregator !== 'count' &&
+      metric.aggregator !== 'value'
+    ) {
       messages.push(
         `Метрика «${metric.label}» требует числовое поле. Выберите другое поле или агрегат.`,
       )
     }
   })
+  const baseIds = new Set(
+    computationBaseMetrics.value.map((metric) => metric.id),
+  )
+  computationFormulaMetrics.value.forEach((metric) => {
+    const error = validateFormulaDefinition(metric, baseIds)
+    if (error) messages.push(error)
+  })
   return messages
 })
+
+function validateFormulaDefinition(metric, baseIds = new Set()) {
+  const label = metric.title?.trim() || metric.label || metric.id
+  const trimmed = metric.expression?.trim()
+  if (!trimmed) {
+    return `Укажите формулу для метрики «${label}».`
+  }
+  const tokens = extractFormulaMetricIds(trimmed)
+  if (!tokens.length) {
+    return `Формула «${label}» должна содержать ссылки на базовые метрики в виде {{ID}}.`
+  }
+  const missing = tokens.filter((token) => !baseIds.has(token))
+  if (missing.length) {
+    return `Формула «${label}» содержит неизвестные метрики: ${missing.join(', ')}.`
+  }
+  const bare = trimmed.replace(FORMULA_TOKEN_REGEX, '')
+  if (!FORMULA_ALLOWED_CHARS.test(bare)) {
+    return `Формула «${label}» содержит недопустимые символы. Доступны цифры, пробелы и операции + - * /.`
+  }
+  return ''
+}
 
 const pivotView = computed(() => {
   if (pivotWarnings.value.length) return null
   if (!filteredPlanRecords.value.length) return null
-  return buildPivotView({
-    records: filteredPlanRecords.value,
-    rows: pivotConfig.rows,
-    columns: pivotConfig.columns,
-    metrics: activeMetrics.value,
-    fieldMeta: fieldsMap.value,
-    headerOverrides,
-    sorts: {
-      rows: pivotSortState.rows,
-      columns: pivotSortState.columns,
-    },
-  })
+  if (!computationBaseMetrics.value.length) return null
+  const { view, errorMetricId } = buildBasePivotView()
+  if (!view || errorMetricId) return null
+  const withFormulas = augmentPivotViewWithFormulas(view, preparedMetrics.value)
+  return filterPivotViewByVisibility(withFormulas, preparedMetrics.value)
 })
 const pivotReady = computed(() =>
   Boolean(pivotView.value && pivotView.value.rows.length),
@@ -2124,7 +2202,7 @@ const metricColumnGroups = computed(() => {
   if (!view) return []
   const columns = view.columns || []
   if (!columns.length) return []
-  return activeMetrics.value.map((metric) => {
+  return visibleMetrics.value.map((metric) => {
     const entries = columns.filter((column) => column.metricId === metric.id)
     return {
       metric,
@@ -2197,12 +2275,12 @@ const tableRows = computed(() => {
 })
 
 const rowTotalMetricIds = computed(() =>
-  activeMetrics.value
+  visibleMetrics.value
     .filter((metric) => metric.showRowTotals)
     .map((metric) => metric.id),
 )
 const columnTotalMetricIds = computed(() =>
-  activeMetrics.value
+  visibleMetrics.value
     .filter((metric) => metric.showColumnTotals)
     .map((metric) => metric.id),
 )
@@ -2226,7 +2304,9 @@ function shouldShowColumnTotal(metricId) {
 }
 function formatGrandTotal(metricId) {
   const map = pivotView.value?.grandTotals || {}
-  return map[metricId] ?? '—'
+  const entry = map[metricId]
+  if (!entry) return '—'
+  return entry.display ?? '—'
 }
 
 function columnWidthStyle(key) {
@@ -2528,10 +2608,14 @@ async function loadFields() {
       reportConfigs.value = []
     }
   } catch (err) {
-    planError.value =
-      err?.response?.data?.message ||
-      err?.message ||
-      'Не удалось загрузить данные источника.'
+    if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
+      planError.value = buildValueAggregationMessage(err.metricId)
+    } else {
+      planError.value =
+        err?.response?.data?.message ||
+        err?.message ||
+        'Не удалось загрузить данные источника.'
+    }
     records.value = []
     fields.value = []
     result.value = null
@@ -2794,6 +2878,7 @@ function detectAggregatorKey(record = {}) {
   )
     return 'avg'
   if (rawName.includes('сум') || rawName.includes('sum')) return 'sum'
+  if (rawName.includes('знач') || rawName.includes('value')) return 'value'
   return null
 }
 
@@ -2953,32 +3038,38 @@ function clearRoutePrefill() {
 }
 
 function ensureMetricExists() {
-  if (!pivotMetrics.length) {
-    const firstNumericField = fields.value.find(
-      (field) => field.type === 'number',
-    )
-    const firstFieldKey = firstNumericField?.key || fields.value[0]?.key || ''
-    pivotMetrics.push(
-      createMetric({
-        fieldKey: firstFieldKey,
-        aggregator: firstNumericField ? 'sum' : 'count',
-      }),
-    )
-    pivotMetricsVersion.value += 1
-  }
+  const hasBaseMetric = pivotMetrics.some((metric) => metric.type !== 'formula')
+  if (pivotMetrics.length && hasBaseMetric) return
+  const firstNumericField = fields.value.find(
+    (field) => field.type === 'number',
+  )
+  const firstFieldKey = firstNumericField?.key || fields.value[0]?.key || ''
+  pivotMetrics.push(
+    createMetric({
+      fieldKey: firstFieldKey,
+      aggregator: firstNumericField ? 'sum' : 'count',
+    }),
+  )
+  pivotMetricsVersion.value += 1
 }
 
 let metricCounter = 0
 function createMetric(overrides = {}) {
   metricCounter += 1
+  const type = overrides.type === 'formula' ? 'formula' : 'base'
   return {
     id: overrides.id || `metric-${metricCounter}`,
+    type,
     fieldKey: overrides.fieldKey || '',
     aggregator: overrides.aggregator || 'count',
     title: overrides.title || '',
     enabled: overrides.enabled !== false,
     showRowTotals: overrides.showRowTotals !== false,
     showColumnTotals: overrides.showColumnTotals !== false,
+    expression: overrides.expression || '',
+    precision: Number.isFinite(overrides.precision)
+      ? Number(overrides.precision)
+      : 2,
     remoteMeta: overrides.remoteMeta || null,
   }
 }
@@ -2989,10 +3080,10 @@ function addMetric() {
 }
 
 function removeMetric(metricId) {
-  if (pivotMetrics.length === 1) return
   const index = pivotMetrics.findIndex((metric) => metric.id === metricId)
   if (index >= 0) {
     pivotMetrics.splice(index, 1)
+    ensureMetricExists()
     pivotMetricsVersion.value += 1
   }
 }
@@ -3276,10 +3367,10 @@ function normalizeRemoteConfig(entry = {}) {
     entry.parent ?? entry.parentId ?? entry.parent_id ?? entry.Parent
   const parentValue = Number(rawParent)
   const parent = Number.isFinite(parentValue) ? parentValue : null
-  const metrics =
-    (entry.complex || []).map((item) =>
-      normalizeRemoteMetric(item, filterPayload.metricSettings || []),
-    ) || []
+  const metrics = mergeMetricSettings(
+    entry.complex || [],
+    filterPayload.metricSettings || [],
+  )
   return {
     id: entry.id ? String(entry.id) : createId(),
     name: entry.name || `Конфигурация ${entry.id || ''}`,
@@ -3361,6 +3452,7 @@ function encodeFilterPayload() {
     sorts: cloneSortState(pivotSortState.filters),
     metricSettings: pivotMetrics.map((metric) => ({
       id: metric.id,
+      type: metric.type || 'base',
       title: metric.title || '',
       enabled: metric.enabled !== false,
       showRowTotals: metric.showRowTotals !== false,
@@ -3368,6 +3460,10 @@ function encodeFilterPayload() {
       aggregator: metric.aggregator,
       remoteId: metric.remoteMeta?.idMetricsComplex,
       fieldKey: metric.fieldKey,
+      expression: metric.expression || '',
+      precision: Number.isFinite(metric.precision)
+        ? Number(metric.precision)
+        : 2,
     })),
     filtersMeta: buildFiltersMetaSnapshot(),
   })
@@ -3424,28 +3520,80 @@ function collectFilterMetaValues(key) {
   return Array.from(unique)
 }
 
-function normalizeRemoteMetric(entry = {}, metricSettings = []) {
-  const aggregatorKey =
-    resolveAggregatorKeyFromRemote(entry.fvFieldVal, entry.pvFieldVal) || 'sum'
-  const saved = metricSettings.find(
-    (item) =>
-      item.remoteId === entry.idMetricsComplex ||
-      item.fieldKey === entry.FieldName,
+function mergeMetricSettings(remoteList = [], settings = []) {
+  const result = []
+  const remoteById = new Map(
+    (remoteList || []).map((entry) => [
+      toNumericValue(entry?.idMetricsComplex),
+      entry,
+    ]),
   )
+  const remoteByField = new Map(
+    (remoteList || []).map((entry) => [
+      entry?.FieldName || entry?.Field,
+      entry,
+    ]),
+  )
+  const usedRemote = new Set()
+  if (Array.isArray(settings) && settings.length) {
+    settings.forEach((saved) => {
+      if (saved?.type === 'formula') {
+        result.push(
+          createMetric({
+            id: saved.id,
+            type: 'formula',
+            title: saved.title || '',
+            enabled: saved.enabled !== false,
+            showRowTotals: saved.showRowTotals !== false,
+            showColumnTotals: saved.showColumnTotals !== false,
+            expression: saved.expression || '',
+            precision: Number.isFinite(saved.precision)
+              ? Number(saved.precision)
+              : 2,
+          }),
+        )
+        return
+      }
+      const remoteEntry =
+        (saved?.remoteId && remoteById.get(toNumericValue(saved.remoteId))) ||
+        (saved?.fieldKey && remoteByField.get(saved.fieldKey))
+      if (remoteEntry) {
+        usedRemote.add(remoteEntry)
+        result.push(normalizeRemoteMetric(remoteEntry, saved))
+      }
+    })
+  }
+  remoteList.forEach((entry, index) => {
+    if (usedRemote.has(entry)) return
+    result.push(normalizeRemoteMetric(entry, null, index))
+  })
+  return result
+}
+
+function normalizeRemoteMetric(entry = {}, saved = null, index = 0) {
+  const fieldKey = entry?.FieldName || saved?.fieldKey || ''
+  const aggregatorKey =
+    saved?.aggregator ||
+    resolveAggregatorKeyFromRemote(entry?.fvFieldVal, entry?.pvFieldVal) ||
+    'sum'
   return createMetric({
-    id: entry.idMetricsComplex ? String(entry.idMetricsComplex) : undefined,
-    fieldKey: entry.FieldName || '',
-    aggregator: saved?.aggregator || aggregatorKey,
+    id:
+      saved?.id ||
+      (entry?.idMetricsComplex ? String(entry.idMetricsComplex) : undefined) ||
+      `metric-${index}`,
+    type: 'base',
+    fieldKey,
+    aggregator: aggregatorKey,
     title: saved?.title || '',
     enabled: saved?.enabled !== false,
     showRowTotals: saved?.showRowTotals !== false,
     showColumnTotals: saved?.showColumnTotals !== false,
     remoteMeta: {
-      idMetricsComplex: entry.idMetricsComplex,
-      idFieldVal: entry.idFieldVal,
-      idFieldName: entry.idFieldName,
-      fvFieldVal: entry.fvFieldVal,
-      pvFieldVal: entry.pvFieldVal,
+      idMetricsComplex: entry?.idMetricsComplex,
+      idFieldVal: entry?.idFieldVal,
+      idFieldName: entry?.idFieldName,
+      fvFieldVal: entry?.fvFieldVal,
+      pvFieldVal: entry?.pvFieldVal,
     },
   })
 }
@@ -3580,7 +3728,7 @@ function applyConfigRecord(record) {
 
   pivotMetrics.splice(0, pivotMetrics.length, ...(record.metrics || []))
   pivotMetricsVersion.value += 1
-  if (!pivotMetrics.length) ensureMetricExists()
+  ensureMetricExists()
 
   Object.keys(filterValues).forEach((key) => delete filterValues[key])
   Object.entries(record.filterValues || {}).forEach(([key, values]) => {
@@ -3689,7 +3837,7 @@ async function saveCurrentConfig() {
     alert('Укажите название конфигурации')
     return
   }
-  if (!activeMetrics.value.length) {
+  if (!preparedMetrics.value.length) {
     alert('Добавьте хотя бы одну метрику')
     return
   }
@@ -3736,6 +3884,7 @@ async function saveCurrentConfig() {
     }
     const configRemoteId = Number(savedId)
     for (const metric of pivotMetrics) {
+      if (metric.type === 'formula') continue
       const metricPayload = buildMetricPayload(metric, configRemoteId)
       const metricOperation = metric.remoteMeta?.idMetricsComplex
         ? 'upd'
@@ -4067,7 +4216,9 @@ function buildCsvFromPivot(
   }
   if (rowHeaders.length) {
     totalsRow.push(
-      ...rowHeaders.map((total) => view.grandTotals[total.metricId]),
+      ...rowHeaders.map(
+        (total) => view.grandTotals?.[total.metricId]?.display || '',
+      ),
     )
   }
 
@@ -4230,6 +4381,40 @@ function normalizeDictionaryUrl(value) {
     }
   }
   return value.trim()
+}
+
+function buildBasePivotView() {
+  try {
+    const baseView = buildPivotView({
+      records: filteredPlanRecords.value,
+      rows: pivotConfig.rows,
+      columns: pivotConfig.columns,
+      metrics: computationBaseMetrics.value,
+      fieldMeta: fieldsMap.value,
+      headerOverrides,
+      sorts: {
+        rows: pivotSortState.rows,
+        columns: pivotSortState.columns,
+      },
+    })
+    return { view: baseView, errorMetricId: null }
+  } catch (err) {
+    if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
+      return { view: null, errorMetricId: err.metricId || null }
+    }
+    throw err
+  }
+}
+
+function buildValueAggregationMessage(metricId) {
+  const metricLabel = resolveMetricLabelById(metricId)
+  return `Метрика «${metricLabel || metricId}» с типом «Значение» получает несколько записей в одной ячейке. Уточните измерения или выберите другой агрегат.`
+}
+
+function resolveMetricLabelById(metricId) {
+  if (!metricId) return ''
+  const match = preparedMetrics.value.find((metric) => metric.id === metricId)
+  return match?.label || ''
 }
 </script>
 

@@ -14,8 +14,21 @@
     </header>
 
     <div v-if="metrics.length" class="metrics-list">
-      <article v-for="(metric, index) in metrics" :key="metric.id" class="metric-card">
-        <div class="metric-card__row">
+      <article
+        v-for="(metric, index) in metrics"
+        :key="metric.id"
+        class="metric-card"
+      >
+        <div class="metric-card__header">
+          <strong>Метрика {{ index + 1 }}</strong>
+          <n-select
+            v-model:value="metric.type"
+            :options="metricTypeOptions"
+            size="small"
+            @update:value="(value) => switchMetricType(metric, value)"
+          />
+        </div>
+        <div v-if="metric.type !== 'formula'" class="metric-card__row">
           <label class="metric-field">
             <span>Поле</span>
             <n-select
@@ -35,6 +48,25 @@
             />
           </label>
         </div>
+        <div v-else class="metric-card__formula">
+          <label class="metric-field">
+            <span>Формула</span>
+            <n-input
+              v-model:value="metric.expression"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 4 }"
+              placeholder="Например: {{metric-1}} / {{metric-2}}"
+            />
+          </label>
+          <div v-if="metricTokens.length" class="formula-hints">
+            <span>Доступные метрики:</span>
+            <ul>
+              <li v-for="token in metricTokens" :key="token.id">
+                {{ token.label }} → <code>{{ formatToken(token.id) }}</code>
+              </li>
+            </ul>
+          </div>
+        </div>
         <label class="metric-field">
           <span>Название метрики</span>
           <n-input
@@ -43,7 +75,9 @@
           />
         </label>
         <div class="metric-settings">
-          <n-checkbox v-model:checked="metric.enabled">Включена</n-checkbox>
+          <n-checkbox v-model:checked="metric.enabled">
+            Показывать в таблице
+          </n-checkbox>
           <n-checkbox v-model:checked="metric.showRowTotals">
             Итоги по строкам
           </n-checkbox>
@@ -124,6 +158,10 @@ const props = defineProps({
     type: Function,
     default: null,
   },
+  metricTokens: {
+    type: Array,
+    default: () => [],
+  },
 })
 
 defineEmits(['add', 'move', 'remove'])
@@ -135,6 +173,29 @@ const fieldOptions = computed(() =>
   })),
 )
 const aggregatorOptions = computed(() => props.aggregators)
+const metricTokens = computed(() => props.metricTokens || [])
+const metricTypeOptions = [
+  { label: 'Поле источника', value: 'base' },
+  { label: 'Формула', value: 'formula' },
+]
+
+function switchMetricType(metric, nextType) {
+  const next = nextType === 'formula' ? 'formula' : 'base'
+  metric.type = next
+  if (next === 'formula') {
+    metric.fieldKey = ''
+    metric.expression = metric.expression || ''
+  } else {
+    metric.expression = ''
+    if (!metric.aggregator || metric.aggregator === 'formula') {
+      metric.aggregator = 'sum'
+    }
+  }
+}
+
+function formatToken(id) {
+  return `{{${id}}}`
+}
 </script>
 
 <style scoped>
@@ -157,6 +218,12 @@ const aggregatorOptions = computed(() => props.aggregators)
   gap: 12px;
   flex-wrap: wrap;
 }
+.metric-card__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
 .metric-field {
   display: flex;
   flex-direction: column;
@@ -174,5 +241,29 @@ const aggregatorOptions = computed(() => props.aggregators)
 .metric-actions {
   display: flex;
   gap: 8px;
+}
+.metric-card__formula {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.formula-hints {
+  font-size: 12px;
+  background: #fff;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #374151;
+}
+.formula-hints ul {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+.formula-hints code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  background: #f3f4f6;
+  padding: 2px 4px;
+  border-radius: 4px;
 }
 </style>
