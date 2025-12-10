@@ -4,6 +4,7 @@ import {
   loadReportSources,
 } from '@/shared/api/report'
 import { fetchFactorValues, loadPresentationLinks } from '@/shared/api/objects'
+import { parseJoinConfig } from '@/shared/lib/sourceJoins'
 
 const FALLBACK_AGGREGATORS = {
   count: { label: 'Количество', fvFieldVal: 1350, pvFieldVal: 1570 },
@@ -142,6 +143,7 @@ function normalizeConfig(entry = {}, index = 0, aggregatorMap) {
   const filterPayload = parseMetaPayload(entry?.FilterVal)
   const rowPayload = parseMetaPayload(entry?.RowVal)
   const colPayload = parseMetaPayload(entry?.ColVal)
+  const knownKeys = collectKnownFieldKeys(filterPayload, rowPayload, colPayload)
   const headerOverrides = {
     ...(filterPayload.headerOverrides || {}),
     ...(rowPayload.headerOverrides || {}),
@@ -157,9 +159,9 @@ function normalizeConfig(entry = {}, index = 0, aggregatorMap) {
     remoteId,
     parentId: toStableId(entry?.parent ?? entry?.Parent ?? entry?.parentId),
     pivot: {
-      filters: parseFieldSequence(entry?.Filter),
-      rows: parseFieldSequence(entry?.Row),
-      columns: parseFieldSequence(entry?.Col),
+      filters: parseFieldSequence(entry?.Filter, knownKeys),
+      rows: parseFieldSequence(entry?.Row, knownKeys),
+      columns: parseFieldSequence(entry?.Col, knownKeys),
     },
     filterValues: filterPayload.values || {},
     rowFilters: rowPayload.values || {},
@@ -188,6 +190,8 @@ function normalizeSource(entry = {}, index = 0) {
     url: entry?.URL || entry?.url || entry?.requestUrl || '',
     body: parseMaybeJson(entry?.MethodBody || entry?.body || entry?.payload),
     headers: parseHeaderPayload(entry?.headers || entry?.Headers),
+    rawBody: entry?.MethodBody || entry?.body || entry?.payload || '',
+    joins: parseJoinConfig(entry?.joinConfig || entry?.JoinConfig),
     remoteMeta: entry || {},
   }
 }
@@ -214,6 +218,7 @@ function normalizeMetrics(list = [], metricSettings = [], aggregatorMap) {
           showRowTotals: saved.showRowTotals !== false,
           showColumnTotals: saved.showColumnTotals !== false,
           expression: saved.expression || '',
+          outputFormat: saved.outputFormat || 'number',
           precision: Number.isFinite(saved.precision)
             ? Number(saved.precision)
             : 2,
@@ -389,7 +394,7 @@ function formatAggregatorLabel(name = '', key = '') {
   return FALLBACK_AGGREGATORS[key]?.label || key
 }
 
-function parseFieldSequence(value) {
+function parseFieldSequence(value, knownKeys = null) {
   if (!value) return []
   if (Array.isArray(value)) {
     return value.map((item) => String(item).trim()).filter(Boolean)
@@ -404,10 +409,12 @@ function parseFieldSequence(value) {
   } catch {
     // ignore
   }
-  return trimmed
+  const tokens = trimmed
     .split(/[.,|;]/)
     .map((item) => item.trim())
     .filter(Boolean)
+  if (!tokens.length) return []
+  return rebuildSequenceTokens(tokens, knownKeys)
 }
 
 function parseMetaPayload(raw) {
@@ -422,6 +429,82 @@ function parseMetaPayload(raw) {
     }
   }
   return {}
+}
+
+function collectKnownFieldKeys(...payloads) {
+  const set = new Set()
+  payloads.forEach((payload) => {
+    if (!payload || typeof payload !== 'object') return
+    collectKeysFromPayload(set, payload.values)
+    collectKeysFromPayload(set, payload.headerOverrides)
+    collectKeysFromPayload(set, payload.sorts)
+    collectKeysFromPayload(set, payload.fieldMeta)
+    if (Array.isArray(payload.filtersMeta)) {
+      payload.filtersMeta.forEach((meta) => {
+        if (meta?.key) set.add(String(meta.key).trim())
+      })
+    }
+    if (Array.isArray(payload.metricSettings)) {
+      payload.metricSettings.forEach((meta) => {
+        if (meta?.fieldKey) set.add(String(meta.fieldKey).trim())
+      })
+    }
+  })
+  return set
+}
+
+function collectKeysFromPayload(target, source) {
+  if (!source || typeof source !== 'object') return
+  Object.keys(source).forEach((key) => {
+    const normalized = String(key).trim()
+    if (normalized) target.add(normalized)
+  })
+}
+
+function rebuildSequenceTokens(tokens = [], knownKeys = new Set()) {
+  const result = []
+  let index = 0
+  while (index < tokens.length) {
+    const match = findKnownSequence(tokens, index, knownKeys)
+    if (match) {
+      result.push(match.value)
+      index = match.nextIndex
+      continue
+    }
+    const heuristic = attemptJoinHeuristic(tokens, index)
+    if (heuristic) {
+      result.push(heuristic.value)
+      index = heuristic.nextIndex
+      continue
+    }
+    result.push(tokens[index])
+    index += 1
+  }
+  return result
+}
+
+function findKnownSequence(tokens, start, knownKeys = new Set()) {
+  if (!knownKeys || !knownKeys.size) return null
+  for (let end = tokens.length; end > start; end -= 1) {
+    const candidate = tokens.slice(start, end).join('.')
+    if (knownKeys.has(candidate)) {
+      return { value: candidate, nextIndex: end }
+    }
+  }
+  return null
+}
+
+const JOIN_PREFIX_PATTERN = /^[A-Z0-9_]+$/
+const JOIN_FIELD_PATTERN = /^[a-zA-Z0-9_]+$/
+
+function attemptJoinHeuristic(tokens, start) {
+  const prefix = tokens[start]
+  const next = tokens[start + 1]
+  if (!prefix || !next) return null
+  if (JOIN_PREFIX_PATTERN.test(prefix) && JOIN_FIELD_PATTERN.test(next)) {
+    return { value: `${prefix}.${next}`, nextIndex: start + 2 }
+  }
+  return null
 }
 
 function parseMaybeJson(value) {

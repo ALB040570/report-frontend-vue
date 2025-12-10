@@ -261,6 +261,8 @@ async function loadExistingPage() {
   containers.forEach((container, index) => {
     draft.layout.containers.push({
       id: container.id || createContainerId(),
+      remoteId: container.remoteId || container.id || null,
+      remoteMeta: container.remoteMeta ? { ...container.remoteMeta } : {},
       title: container.title,
       templateId: container.templateId || '',
       widthOption: container.widthOption || widthOptions.value[0]?.value || '',

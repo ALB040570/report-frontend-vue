@@ -1,12 +1,17 @@
-export function formatNumber(value) {
-  if (value === null || typeof value === 'undefined') return '—'
-  if (Number.isInteger(value)) {
-    return new Intl.NumberFormat('ru-RU').format(value)
+export function formatNumber(value, precision = 2) {
+  if (value === null || typeof value === 'undefined' || value === '') return '—'
+  const num = Number(value)
+  if (Number.isNaN(num)) return '—'
+  if (precision === 0) {
+    return new Intl.NumberFormat('ru-RU', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(num)
   }
   return new Intl.NumberFormat('ru-RU', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
+    minimumFractionDigits: precision,
+    maximumFractionDigits: precision,
+  }).format(num)
 }
 
 export function formatValue(value) {
@@ -21,6 +26,39 @@ function formatMetricOutput(value, aggregator) {
     return String(value)
   }
   return formatNumber(value)
+}
+
+export function formatFormulaValue(value, format = 'number', precision = 2) {
+  if (value === null || typeof value === 'undefined' || value === '') return '—'
+  if (format === 'text') {
+    return String(value)
+  }
+  if (format === 'integer') {
+    return formatNumber(value, 0)
+  }
+  if (format === 'percent') {
+    const numeric = Number(value)
+    if (Number.isNaN(numeric)) return '—'
+    return `${formatNumber(numeric * 100, precision)}%`
+  }
+  if (format === 'currency') {
+    const numeric = Number(value)
+    if (Number.isNaN(numeric)) return '—'
+    return new Intl.NumberFormat('ru-RU', {
+      style: 'currency',
+      currency: 'RUB',
+      minimumFractionDigits: precision,
+      maximumFractionDigits: precision,
+    }).format(numeric)
+  }
+  if (format === 'auto') {
+    const numeric = Number(value)
+    if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+      return formatNumber(numeric, precision)
+    }
+    return String(value)
+  }
+  return formatNumber(value, precision)
 }
 
 export function normalizeValue(value) {
@@ -764,7 +802,12 @@ export function augmentPivotViewWithFormulas(view, metrics = []) {
   }
 }
 
-function computeRowTotals(rows, metricOrder, formulaEvaluators, isTree = false) {
+function computeRowTotals(
+  rows,
+  metricOrder,
+  formulaEvaluators,
+  isTree = false,
+) {
   if (!Array.isArray(rows) || !rows.length) return rows
   return rows.map((row) => {
     const totalMap = (row.totals || []).reduce((acc, total) => {
@@ -785,12 +828,16 @@ function computeRowTotals(rows, metricOrder, formulaEvaluators, isTree = false) 
         return {
           metricId: metric.id,
           value,
-          display: formatNumber(value),
+          display: formatFormulaValue(
+            value,
+            metric.outputFormat,
+            metric.precision,
+          ),
         }
       }
-        const entry = totalMap.get(metric.id)
-        if (entry) return entry
-        return { metricId: metric.id, display: '—', value: null }
+      const entry = totalMap.get(metric.id)
+      if (entry) return entry
+      return { metricId: metric.id, display: '—', value: null }
     })
     const base = {
       ...row,
@@ -824,7 +871,11 @@ function buildGrandTotals(baseTotals, metricOrder, formulaEvaluators) {
       const value = evaluator((id) => values[id])
       result[metric.id] = {
         value,
-        display: formatNumber(value),
+        display: formatFormulaValue(
+          value,
+          metric.outputFormat,
+          metric.precision,
+        ),
       }
     } else {
       result[metric.id] = baseTotals[metric.id] || { value: null, display: '—' }
@@ -857,7 +908,11 @@ function buildAugmentedColumns({
           label: template?.label || metric.label || '',
           aggregator: 'formula',
           levels: template?.levels || [],
-          totalDisplay: formatNumber(value),
+          totalDisplay: formatFormulaValue(
+            value,
+            metric.outputFormat,
+            metric.precision,
+          ),
           value,
         })
       } else {
@@ -947,7 +1002,11 @@ function buildCellSequence({
         cells.push({
           key: `${rowKey}||${baseKey}||${metric.id}`,
           value,
-          display: formatNumber(value),
+          display: formatFormulaValue(
+            value,
+            metric.outputFormat,
+            metric.precision,
+          ),
         })
       } else {
         const cell = metricsMap.get(metric.id)
@@ -1014,21 +1073,15 @@ function buildColumnBaseMeta(columns) {
 function compileFormulaExpression(expression = '') {
   const trimmed = String(expression || '').trim()
   if (!trimmed) return null
-  const bare = trimmed.replace(FORMULA_TOKEN_REGEX, '')
-  if (!/^[0-9+\-*/().\s]*$/.test(bare)) return null
-  const dependencies = []
   const jsExpression = trimmed.replace(FORMULA_TOKEN_REGEX, (_, id) => {
-    if (id) dependencies.push(id)
+    if (!id) return '__get("")'
     return `__get("${id}")`
   })
   try {
-    const fn = new Function(
-      '__get',
-      `const result = ${jsExpression}; return typeof result === 'number' && Number.isFinite(result) ? result : null;`,
-    )
+    const fn = new Function('__get', `return (${jsExpression});`)
     return (resolver) => {
       try {
-        return fn((id) => normalizeNumericValue(resolver(id)))
+        return fn((id) => resolver(id))
       } catch {
         return null
       }
@@ -1036,12 +1089,6 @@ function compileFormulaExpression(expression = '') {
   } catch {
     return null
   }
-}
-
-function normalizeNumericValue(value) {
-  if (value === null || typeof value === 'undefined') return NaN
-  const num = Number(value)
-  return Number.isFinite(num) ? num : NaN
 }
 
 function buildColumnKey(baseKey, metricId) {

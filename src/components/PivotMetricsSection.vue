@@ -48,12 +48,12 @@
             />
           </label>
         </div>
-        <div v-else class="metric-card__formula">
-          <label class="metric-field">
-            <span>Формула</span>
-            <n-input
-              v-model:value="metric.expression"
-              type="textarea"
+          <div v-else class="metric-card__formula">
+            <label class="metric-field">
+              <span>Формула</span>
+              <n-input
+                v-model:value="metric.expression"
+                type="textarea"
               :autosize="{ minRows: 2, maxRows: 4 }"
               placeholder="Например: {{metric-1}} / {{metric-2}}"
             />
@@ -66,6 +66,26 @@
               </li>
             </ul>
           </div>
+          <label class="metric-field">
+            <span>Формат значения</span>
+            <n-select
+              v-model:value="metric.outputFormat"
+              :options="formulaFormatOptions"
+              size="large"
+            />
+          </label>
+          <label
+            v-if="isNumericFormat(metric.outputFormat)"
+            class="metric-field"
+          >
+            <span>Знаков после запятой</span>
+            <n-input-number
+              v-model:value="metric.precision"
+              :min="0"
+              :max="6"
+              size="large"
+            />
+          </label>
         </div>
         <label class="metric-field">
           <span>Название метрики</span>
@@ -139,7 +159,14 @@
 
 <script setup>
 import { computed } from 'vue'
-import { NButton, NCheckbox, NInput, NSelect, NTooltip } from 'naive-ui'
+import {
+  NButton,
+  NCheckbox,
+  NInput,
+  NInputNumber,
+  NSelect,
+  NTooltip,
+} from 'naive-ui'
 
 const props = defineProps({
   metrics: {
@@ -178,6 +205,14 @@ const metricTypeOptions = [
   { label: 'Поле источника', value: 'base' },
   { label: 'Формула', value: 'formula' },
 ]
+const formulaFormatOptions = [
+  { label: 'Авто', value: 'auto' },
+  { label: 'Число', value: 'number' },
+  { label: 'Целое число', value: 'integer' },
+  { label: 'Проценты', value: 'percent' },
+  { label: 'Валюта (₽)', value: 'currency' },
+  { label: 'Текст', value: 'text' },
+]
 
 function switchMetricType(metric, nextType) {
   const next = nextType === 'formula' ? 'formula' : 'base'
@@ -185,16 +220,32 @@ function switchMetricType(metric, nextType) {
   if (next === 'formula') {
     metric.fieldKey = ''
     metric.expression = metric.expression || ''
+    metric.outputFormat = metric.outputFormat || 'number'
+    if (!Number.isFinite(metric.precision)) {
+      metric.precision = 2
+    }
   } else {
     metric.expression = ''
     if (!metric.aggregator || metric.aggregator === 'formula') {
       metric.aggregator = 'sum'
     }
+    metric.outputFormat = 'auto'
   }
 }
 
 function formatToken(id) {
   return `{{${id}}}`
+}
+
+function isNumericFormat(format) {
+  return (
+    !format ||
+    format === 'auto' ||
+    format === 'number' ||
+    format === 'integer' ||
+    format === 'percent' ||
+    format === 'currency'
+  )
 }
 </script>
 

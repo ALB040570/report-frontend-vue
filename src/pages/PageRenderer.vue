@@ -421,6 +421,7 @@ import {
 import { fetchPlanRecords } from '@/shared/api/plan'
 import { fetchParameterRecords } from '@/shared/api/parameter'
 import { sendDataSourceRequest } from '@/shared/api/dataSource'
+import { loadReportSources } from '@/shared/api/report'
 import ReportChart from '@/components/ReportChart.vue'
 import {
   buildPivotView,
@@ -431,7 +432,12 @@ import {
 } from '@/shared/lib/pivotUtils'
 import MultiSelectDropdown from '@/components/MultiSelectDropdown.vue'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
-
+import {
+  normalizeJoinList,
+  mergeJoinedRecords,
+  fetchJoinPayload,
+  parseJoinConfig,
+} from '@/shared/lib/sourceJoins'
 const route = useRoute()
 const router = useRouter()
 const store = usePageBuilderStore()
@@ -445,6 +451,9 @@ const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
 const dictionaryLabelsLower = computed(
   () => fieldDictionaryStore.labelMapLower || {},
 )
+const remoteSourceCatalog = reactive(new Map())
+const remoteSourcesLoaded = ref(false)
+const remoteSourcesLoading = ref(false)
 
 onMounted(async () => {
   await Promise.all([
@@ -950,7 +959,26 @@ async function ensureRemoteSourceData(source, { force = false } = {}) {
   }
   const request = buildRemoteRequest(source)
   const response = await sendDataSourceRequest(request)
-  const records = extractRecords(response)
+  let records = extractRecords(response)
+  const joins = resolveSourceJoins(source)
+  if (records?.length && joins.length) {
+    try {
+      const joinResults = await fetchRemoteJoinRecords(joins)
+      const successful = joinResults.filter((item) => !item.error)
+      if (successful.length) {
+        const joinRecordsList = successful.map((item) => item.records || [])
+        const appliedJoins = successful.map((item) => joins[item.index])
+        const { records: enriched } = mergeJoinedRecords(
+          records,
+          appliedJoins,
+          joinRecordsList,
+        )
+        records = enriched
+      }
+    } catch (err) {
+      console.warn('Failed to merge remote joins', err)
+    }
+  }
   if (cacheKey) {
     dataCache[cacheKey] = records
   }
@@ -1005,6 +1033,193 @@ function extractRecords(payload) {
   if (Array.isArray(payload.result)) return payload.result
   if (Array.isArray(payload.records)) return payload.records
   return []
+}
+
+async function fetchRemoteJoinRecords(joins = []) {
+  if (!joins.length) return []
+  await ensureRemoteSourceCatalog()
+  const tasks = joins.map(async (join, index) => {
+    const target = getRemoteSourceFromCatalog(join.targetSourceId)
+    if (!target) {
+      return {
+        index,
+        join,
+        records: [],
+        error: `Источник связи «${join.targetSourceId}» не найден.`,
+      }
+    }
+    const { payload, error } = buildJoinRequestPayload(target)
+    if (!payload || error) {
+      return {
+        index,
+        join,
+        records: [],
+        error:
+          error ||
+          `Источник связи «${join.targetSourceId}» содержит некорректный запрос.`,
+      }
+    }
+    try {
+      const response = await fetchJoinPayload(payload, { cache: true })
+      return {
+        index,
+        join,
+        records: extractRecords(response),
+      }
+    } catch (err) {
+      return {
+        index,
+        join,
+        records: [],
+        error:
+          err?.response?.data?.message ||
+          err?.message ||
+          `Не удалось выполнить связь «${join.targetSourceId}».`,
+      }
+    }
+  })
+  const results = await Promise.all(tasks)
+  return results.sort((a, b) => a.index - b.index)
+}
+
+async function ensureRemoteSourceCatalog(force = false) {
+  if (remoteSourcesLoaded.value && !force && remoteSourceCatalog.size) {
+    return remoteSourceCatalog
+  }
+  if (remoteSourcesLoading.value && !force) {
+    return remoteSourceCatalog
+  }
+  remoteSourcesLoading.value = true
+  try {
+    remoteSourceCatalog.clear()
+    const records = await loadReportSources()
+    ;(records || []).forEach((entry, index) => {
+      const normalized = normalizeRemoteSourceRecord(entry, index)
+      const key = normalized.remoteId || normalized.id
+      if (key) {
+        remoteSourceCatalog.set(String(key), normalized)
+      }
+      if (normalized.name && !remoteSourceCatalog.has(normalized.name)) {
+        remoteSourceCatalog.set(normalized.name, normalized)
+      }
+    })
+    remoteSourcesLoaded.value = true
+  } catch (err) {
+    console.warn('Failed to load remote sources for joins', err)
+  } finally {
+    remoteSourcesLoading.value = false
+  }
+  return remoteSourceCatalog
+}
+
+function getRemoteSourceFromCatalog(id) {
+  if (id == null) return null
+  const direct = remoteSourceCatalog.get(String(id))
+  if (direct) return direct
+  return remoteSourceCatalog.get(id)
+}
+
+function normalizeRemoteSourceRecord(entry = {}, index = 0) {
+  const remoteId = entry?.id ?? entry?.Id ?? entry?.ID
+  const normalizedId =
+    remoteId !== undefined && remoteId !== null
+      ? String(remoteId)
+      : `remote-${index}`
+  const method =
+    entry?.nameMethodTyp ||
+    entry?.Method ||
+    entry?.method ||
+    entry?.httpMethod ||
+    'POST'
+  const headers = entry?.headers || entry?.Headers || {}
+  const body =
+    entry?.MethodBody ||
+    entry?.body ||
+    entry?.payload ||
+    entry?.requestBody ||
+    entry?.rawBody ||
+    ''
+  return {
+    id: normalizedId,
+    remoteId: normalizedId,
+    name: entry?.name || entry?.Name || '',
+    url: entry?.URL || entry?.url || entry?.requestUrl || '',
+    httpMethod: String(method || 'POST').toUpperCase(),
+    rawBody: formatRawBody(body),
+    headers,
+    joins: parseJoinConfig(entry?.joinConfig || entry?.JoinConfig),
+    remoteMeta: entry || {},
+  }
+}
+
+function formatRawBody(body) {
+  if (!body) return ''
+  if (typeof body === 'string') {
+    try {
+      const parsed = JSON.parse(body)
+      return JSON.stringify(parsed, null, 2)
+    } catch {
+      return body
+    }
+  }
+  try {
+    return JSON.stringify(body, null, 2)
+  } catch {
+    return ''
+  }
+}
+
+function buildJoinRequestPayload(source = {}) {
+  const url = source.url?.trim()
+  if (!url) {
+    return { payload: null, error: 'У источника нет URL.' }
+  }
+  const method = String(source.httpMethod || 'POST').toUpperCase()
+  const headers = normalizeRemoteHeaders(
+    source.headers || source.remoteMeta?.Headers,
+  )
+  const rawBody = source.rawBody?.trim() || ''
+  if (method === 'GET') {
+    if (!rawBody) {
+      return { payload: { url, method, headers }, error: null }
+    }
+    const parsed = safeJsonParse(rawBody)
+    if (!parsed.ok) {
+      return {
+        payload: null,
+        error: 'Параметры GET-запроса должны быть корректным JSON.',
+      }
+    }
+    return { payload: { url, method, headers, body: parsed.value }, error: null }
+  }
+  if (!rawBody) {
+    return { payload: null, error: 'Тело запроса не заполнено.' }
+  }
+  const parsed = safeJsonParse(rawBody)
+  if (!parsed.ok || typeof parsed.value !== 'object') {
+    return {
+      payload: null,
+      error: 'Тело запроса должно быть валидным JSON-объектом.',
+    }
+  }
+  return { payload: { url, method, headers, body: parsed.value }, error: null }
+}
+
+function safeJsonParse(value = '') {
+  try {
+    return { ok: true, value: JSON.parse(value) }
+  } catch {
+    return { ok: false, value: null }
+  }
+}
+
+function resolveSourceJoins(source = {}) {
+  if (!source) return []
+  if (Array.isArray(source.joins) && source.joins.length) {
+    return normalizeJoinList(source.joins)
+  }
+  const parsed = parseJoinConfig(source?.remoteMeta?.joinConfig)
+  return normalizeJoinList(parsed)
 }
 
 function matchFieldSet(record, keys = [], store = {}) {
@@ -1065,6 +1280,14 @@ function prepareMetrics(list = []) {
         type: metric.type || 'base',
         label: displayLabel,
         enabled: metric.enabled !== false,
+        outputFormat:
+          metric.outputFormat ||
+          (metric.type === 'formula' ? 'number' : 'auto'),
+        precision: Number.isFinite(metric.precision)
+          ? Number(metric.precision)
+          : metric.type === 'formula'
+            ? 2
+            : 2,
       }
     })
 }
@@ -1330,13 +1553,17 @@ function refreshContainers() {
 
 async function refreshPageData() {
   if (pageRefreshing.value) return
-  const containers = pageContainers.value || []
-  if (!containers.length) {
-    refreshContainers()
-    return
-  }
   pageRefreshing.value = true
   try {
+    await Promise.all([store.fetchTemplates(true), store.fetchPages(true)])
+    if (pageId.value) {
+      await store.fetchPageContainers(pageId.value, true)
+    }
+    const containers = pageContainers.value || []
+    if (!containers.length) {
+      refreshContainers()
+      return
+    }
     const grouped = groupContainersByTemplate(containers)
     const tasks = grouped.map(async ({ tpl, containers: related }) => {
       const records = await ensureTemplateData(tpl, { force: true })

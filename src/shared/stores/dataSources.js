@@ -12,7 +12,6 @@ import {
 
 const STORAGE_KEY = 'report-data-sources'
 const USER_CONTEXT_KEY = 'report-user-context'
-const envFallbackUserContext = resolveEnvFallbackUserContext()
 
 const defaultSources = [
   {
@@ -65,7 +64,8 @@ function loadSources() {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length) return parsed.map(applyJoinDefaults)
+      if (Array.isArray(parsed) && parsed.length)
+        return parsed.map(applyJoinDefaults)
     }
   } catch (err) {
     console.warn('Failed to load data sources', err)
@@ -156,7 +156,8 @@ export const useDataSourcesStore = defineStore('dataSources', {
     userLoading: false,
   }),
   getters: {
-    getById: (state) => (id) => state.sources.find((source) => source.id === id),
+    getById: (state) => (id) =>
+      state.sources.find((source) => source.id === id),
   },
   actions: {
     async saveSource(payload) {
@@ -204,7 +205,9 @@ export const useDataSourcesStore = defineStore('dataSources', {
         const data = await callReportMethod('report/loadReportSource', [0])
         const records = extractRecords(data)
         if (!records.length) return
-        const mapped = records.map((entry, index) => normalizeRemoteSource(entry, index))
+        const mapped = records.map((entry, index) =>
+          normalizeRemoteSource(entry, index),
+        )
         if (mapped.length) {
           this.sources = mapped
           this.loadedFromRemote = true
@@ -244,11 +247,6 @@ export const useDataSourcesStore = defineStore('dataSources', {
           persistUserContext(external)
           return this.userContext
         }
-        const fallback = cloneEnvFallbackUserContext()
-        if (fallback) {
-          this.userContext = fallback
-          return this.userContext
-        }
       }
       if (this._userContextPromise && !force) {
         await this._userContextPromise
@@ -273,7 +271,9 @@ export const useDataSourcesStore = defineStore('dataSources', {
             const external = loadExternalUserContext()
             if (external) this.userContext = external
           }
-          persistUserContext(hasValidUserContext(this.userContext) ? this.userContext : null)
+          persistUserContext(
+            hasValidUserContext(this.userContext) ? this.userContext : null,
+          )
         } catch (err) {
           console.warn('Failed to fetch user context', err)
           if (!this.userContext) {
@@ -286,10 +286,6 @@ export const useDataSourcesStore = defineStore('dataSources', {
       }
       if (force) {
         await runner()
-        const fallback = cloneEnvFallbackUserContext()
-        if (!hasValidUserContext(this.userContext) && fallback) {
-          this.userContext = fallback
-        }
         return this.userContext
       }
       this._userContextPromise = runner()
@@ -298,21 +294,19 @@ export const useDataSourcesStore = defineStore('dataSources', {
       } finally {
         this._userContextPromise = null
       }
-      if (!hasValidUserContext(this.userContext)) {
-        const fallback = cloneEnvFallbackUserContext()
-        if (fallback) {
-          this.userContext = fallback
-        }
-      }
       return this.userContext
     },
     async saveRemoteRecord(source) {
-      const userContext = await this.fetchUserContext()
+      const fallbackUserContext = loadExternalUserContext()
+      const userContext = fallbackUserContext || (await this.fetchUserContext())
       const payload = buildRemotePayload(source, this.methodTypes, userContext)
       if (!payload) return
       const numericId = toNumericId(source.remoteMeta?.id || source.id)
       const operation = numericId ? 'upd' : 'ins'
-      const data = await callReportMethod('report/saveReportSource', [operation, payload])
+      const data = await callReportMethod('report/saveReportSource', [
+        operation,
+        payload,
+      ])
       const saved = extractRecords(data)[0]
       if (saved) {
         source.remoteMeta = buildRemoteMeta(saved)
@@ -324,27 +318,6 @@ export const useDataSourcesStore = defineStore('dataSources', {
   },
 })
 
-function cloneEnvFallbackUserContext() {
-  if (!envFallbackUserContext) return null
-  return { ...envFallbackUserContext }
-}
-
-function resolveEnvFallbackUserContext() {
-  const objUser = toNumericId(import.meta.env.VITE_FAKE_OBJ_USER)
-  const pvUser = toNumericId(import.meta.env.VITE_FAKE_PV_USER)
-  if (!Number.isFinite(objUser) || !Number.isFinite(pvUser)) return null
-  const idUser =
-    toNumericId(import.meta.env.VITE_FAKE_USER_ID) || objUser || pvUser || null
-  const fullName = (import.meta.env.VITE_FAKE_USER_FULLNAME || '').trim()
-  return {
-    idUser,
-    objUser,
-    pvUser,
-    fullNameUser: fullName,
-    __fallback: true,
-  }
-}
-
 function extractRecords(payload) {
   if (!payload || typeof payload !== 'object') return []
   if (Array.isArray(payload.result?.records)) return payload.result.records
@@ -355,7 +328,8 @@ function extractRecords(payload) {
 
 function normalizeRemoteSource(entry = {}, index = 0) {
   const id = entry.id ? String(entry.id) : createId(`remote-${index}`)
-  const name = entry.name || entry.title || entry.Name || `Источник ${index + 1}`
+  const name =
+    entry.name || entry.title || entry.Name || `Источник ${index + 1}`
   const url = entry.url || entry.URL || entry.requestUrl || '/dtj/api/plan'
   const httpMethod =
     entry.nameMethodTyp?.toUpperCase?.() ||
@@ -369,7 +343,8 @@ function normalizeRemoteSource(entry = {}, index = 0) {
       entry.rawBody ||
       entry.MethodBody,
   )
-  const headers = entry.headers || entry.Headers || { 'Content-Type': 'application/json' }
+  const headers = entry.headers ||
+    entry.Headers || { 'Content-Type': 'application/json' }
   return {
     id,
     name,
@@ -443,17 +418,15 @@ function buildRemoteMeta(entry = {}) {
 
 function buildRemotePayload(source, methodTypes = [], userContext = null) {
   if (!source?.name) return null
-  const nativeId = toNumericId(source.remoteMeta?.id || source.id)
+  const nativeId = toNumericId(source.remoteMeta?.id)
   const meta = source.remoteMeta || {}
   const methodName = source.httpMethod?.toUpperCase?.() || 'POST'
-  const methodMeta =
-    findMethodMeta(methodName, methodTypes) ||
-    {
-      fvMethodTyp: meta.fvMethodTyp,
-      pvMethodTyp: meta.pvMethodTyp,
-      nameMethodTyp: meta.nameMethodTyp || methodName,
-    }
-  return {
+  const methodMeta = findMethodMeta(methodName, methodTypes) || {
+    fvMethodTyp: meta.fvMethodTyp,
+    pvMethodTyp: meta.pvMethodTyp,
+    nameMethodTyp: meta.nameMethodTyp || methodName,
+  }
+  const payload = {
     id: nativeId,
     cls: meta.cls,
     name: source.name,
@@ -464,7 +437,6 @@ function buildRemotePayload(source, methodTypes = [], userContext = null) {
     pvMethodTyp: methodMeta.pvMethodTyp || 0,
     nameMethodTyp: methodMeta.nameMethodTyp || methodName,
     idMethodBody: meta.idMethodBody,
-    MethodBody: source.rawBody || meta.MethodBody || '',
     idCreatedAt: meta.idCreatedAt,
     CreatedAt: meta.CreatedAt || source.createdAt || new Date().toISOString(),
     idUpdatedAt: meta.idUpdatedAt,
@@ -475,7 +447,32 @@ function buildRemotePayload(source, methodTypes = [], userContext = null) {
     fullNameUser: userContext?.fullNameUser || meta.fullNameUser || '',
     URL: source.url || meta.URL || '',
     joinConfig: serializeJoinConfig(source.joins || []),
+    MethodBody: serializeSourcePayload(source),
   }
+
+  if (!nativeId) {
+    delete payload.id
+  }
+
+  return payload
+}
+
+function serializeSourcePayload(source = {}) {
+  const base = source.rawBody?.trim()
+  let payload
+  if (!base) {
+    payload = {}
+  } else {
+    try {
+      payload = JSON.parse(base)
+    } catch {
+      return base
+    }
+  }
+  if (Array.isArray(source.joins) && source.joins.length) {
+    payload.__joins = source.joins
+  }
+  return JSON.stringify(payload)
 }
 
 function toNumericId(value) {

@@ -1028,6 +1028,7 @@ import { fetchFactorValues } from '@/shared/api/objects'
 import { useDataSourcesStore } from '@/shared/stores/dataSources'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
 import { useNavigationStore } from '@/shared/stores/navigation'
+import { usePageBuilderStore } from '@/shared/stores/pageBuilder'
 import {
   buildPivotView,
   humanizeKey,
@@ -1047,6 +1048,7 @@ import {
 const dataSourcesStore = useDataSourcesStore()
 const fieldDictionaryStore = useFieldDictionaryStore()
 const navigationStore = useNavigationStore()
+const pageBuilderStore = usePageBuilderStore()
 const dataSources = computed(() => dataSourcesStore.sources)
 const dataSource = ref('')
 const vizType = ref('table')
@@ -1073,7 +1075,8 @@ const joinTypeOptions = [
   { label: 'LEFT (все строки основного источника)', value: 'left' },
   { label: 'INNER (только совпадения)', value: 'inner' },
 ]
-const FORMULA_ALLOWED_CHARS = /^[0-9+\-*/().\s]*$/
+const FORMULA_ALLOWED_CHARS = /^[0-9+\-*/().<>=!&|?:,_\s]+$/
+const FORMULA_STRING_LITERAL_PATTERN = /(["'])(?:\\.|(?!\1).)*\1/g
 const FORMULA_TOKEN_REGEX = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g
 const sourceDraft = reactive(createBlankSource())
 const rawBodyError = ref('')
@@ -2150,22 +2153,50 @@ function validateFormulaDefinition(metric, baseIds = new Set()) {
   if (missing.length) {
     return `Формула «${label}» содержит неизвестные метрики: ${missing.join(', ')}.`
   }
-  const bare = trimmed.replace(FORMULA_TOKEN_REGEX, '')
-  if (!FORMULA_ALLOWED_CHARS.test(bare)) {
-    return `Формула «${label}» содержит недопустимые символы. Доступны цифры, пробелы и операции + - * /.`
+  const sanitized = sanitizeFormulaExpression(trimmed)
+  if (!FORMULA_ALLOWED_CHARS.test(sanitized)) {
+    return `Формула «${label}» содержит недопустимые символы. Доступны цифры, пробелы, операции, сравнения и тернарный оператор.`
   }
   return ''
 }
 
+function sanitizeFormulaExpression(value = '') {
+  if (!value) return ''
+  return value
+    .replace(FORMULA_TOKEN_REGEX, '')
+    .replace(FORMULA_STRING_LITERAL_PATTERN, '')
+}
+
+const basePivotResult = computed(() => {
+  if (pivotWarnings.value.length) return { view: null, errorMetricId: null }
+  if (!filteredPlanRecords.value.length)
+    return { view: null, errorMetricId: null }
+  if (!computationBaseMetrics.value.length)
+    return { view: null, errorMetricId: null }
+  return buildBasePivotView()
+})
+
 const pivotView = computed(() => {
-  if (pivotWarnings.value.length) return null
-  if (!filteredPlanRecords.value.length) return null
-  if (!computationBaseMetrics.value.length) return null
-  const { view, errorMetricId } = buildBasePivotView()
+  const { view, errorMetricId } = basePivotResult.value
   if (!view || errorMetricId) return null
   const withFormulas = augmentPivotViewWithFormulas(view, preparedMetrics.value)
   return filterPivotViewByVisibility(withFormulas, preparedMetrics.value)
 })
+
+watch(
+  () => basePivotResult.value.errorMetricId,
+  (metricId) => {
+    if (metricId) {
+      planError.value = buildValueAggregationMessage(metricId)
+    } else if (
+      planError.value &&
+      planError.value.startsWith('Метрика «') &&
+      !pivotWarnings.value.length
+    ) {
+      planError.value = ''
+    }
+  },
+)
 const pivotReady = computed(() =>
   Boolean(pivotView.value && pivotView.value.rows.length),
 )
@@ -3066,10 +3097,15 @@ function createMetric(overrides = {}) {
     enabled: overrides.enabled !== false,
     showRowTotals: overrides.showRowTotals !== false,
     showColumnTotals: overrides.showColumnTotals !== false,
+    outputFormat:
+      overrides.outputFormat ||
+      (type === 'formula' ? 'number' : overrides.outputFormat || 'auto'),
     expression: overrides.expression || '',
     precision: Number.isFinite(overrides.precision)
       ? Number(overrides.precision)
-      : 2,
+      : type === 'formula'
+        ? 2
+        : 2,
     remoteMeta: overrides.remoteMeta || null,
   }
 }
@@ -3113,8 +3149,11 @@ function loadDraftFromSource(source) {
     resetSourceDraft()
     return
   }
+  const parsedBody = parseSourceBodyForJoins(source.rawBody)
   resetSourceDraft({
     ...source,
+    rawBody: parsedBody.cleanedBody,
+    joins: normalizeJoinList(parsedBody.joins || source.joins || []),
     headers: {
       'Content-Type': 'application/json',
       ...(source.headers || {}),
@@ -3358,6 +3397,7 @@ function normalizeRemoteConfig(entry = {}) {
   const filterPayload = parseMetaPayload(entry.FilterVal)
   const rowPayload = parseMetaPayload(entry.RowVal)
   const colPayload = parseMetaPayload(entry.ColVal)
+  const knownKeys = collectKnownFieldKeys(filterPayload, rowPayload, colPayload)
   const combinedOverrides = {
     ...(filterPayload.headerOverrides || {}),
     ...(rowPayload.headerOverrides || {}),
@@ -3377,14 +3417,16 @@ function normalizeRemoteConfig(entry = {}) {
     parent,
     remoteMeta: entry,
     pivot: {
-      filters: parseFieldSequence(entry.Filter),
-      rows: parseFieldSequence(entry.Row),
-      columns: parseFieldSequence(entry.Col),
+      filters: parseFieldSequence(entry.Filter, knownKeys),
+      rows: parseFieldSequence(entry.Row, knownKeys),
+      columns: parseFieldSequence(entry.Col, knownKeys),
     },
     headerOverrides: combinedOverrides,
     filterValues: filterPayload.values || {},
     rowFilters: rowPayload.values || {},
     columnFilters: colPayload.values || {},
+    filtersMeta: filterPayload.filtersMeta || [],
+    fieldMeta: filterPayload.fieldMeta || {},
     sorts: {
       filters: filterPayload.sorts || {},
       rows: rowPayload.sorts || {},
@@ -3411,7 +3453,7 @@ function normalizeRemotePresentation(entry = {}) {
   }
 }
 
-function parseFieldSequence(value) {
+function parseFieldSequence(value, knownKeys = null) {
   if (!value) return []
   if (Array.isArray(value)) return value.filter(Boolean)
   const trimmed = String(value).trim()
@@ -3422,14 +3464,70 @@ function parseFieldSequence(value) {
   } catch {
     // ignore
   }
-  return trimmed
+  const tokens = trimmed
     .split(/[.,|;]/)
     .map((token) => token.trim())
     .filter(Boolean)
+  if (!tokens.length) return []
+  return rebuildSequenceTokens(tokens, knownKeys)
+}
+
+function rebuildSequenceTokens(tokens = [], knownKeys = new Set()) {
+  const result = []
+  let index = 0
+  while (index < tokens.length) {
+    const match = findKnownSequence(tokens, index, knownKeys)
+    if (match) {
+      result.push(match.value)
+      index = match.nextIndex
+      continue
+    }
+    const heuristic = attemptJoinHeuristic(tokens, index)
+    if (heuristic) {
+      result.push(heuristic.value)
+      index = heuristic.nextIndex
+      continue
+    }
+    result.push(tokens[index])
+    index += 1
+  }
+  return result
+}
+
+function findKnownSequence(tokens, start, knownKeys = new Set()) {
+  if (!knownKeys || !knownKeys.size) return null
+  for (let end = tokens.length; end > start; end -= 1) {
+    const candidate = tokens.slice(start, end).join('.')
+    if (knownKeys.has(candidate)) {
+      return { value: candidate, nextIndex: end }
+    }
+  }
+  return null
+}
+
+const JOIN_PREFIX_PATTERN = /^[A-Z0-9_]+$/
+const JOIN_FIELD_PATTERN = /^[a-zA-Z0-9_]+$/
+
+function attemptJoinHeuristic(tokens, start) {
+  const prefix = tokens[start]
+  const next = tokens[start + 1]
+  if (!prefix || !next) return null
+  if (JOIN_PREFIX_PATTERN.test(prefix) && JOIN_FIELD_PATTERN.test(next)) {
+    return { value: `${prefix}.${next}`, nextIndex: start + 2 }
+  }
+  return null
 }
 
 function encodeFieldSequence(list = []) {
-  return list.filter(Boolean).join('.')
+  const filtered = (list || [])
+    .map((item) => (typeof item === 'string' ? item.trim() : String(item || '').trim()))
+    .filter(Boolean)
+  if (!filtered.length) return ''
+  try {
+    return JSON.stringify(filtered)
+  } catch {
+    return filtered.join('|')
+  }
 }
 
 function parseMetaPayload(value) {
@@ -3443,6 +3541,36 @@ function parseMetaPayload(value) {
     }
   }
   return { values: {} }
+}
+
+function collectKnownFieldKeys(...payloads) {
+  const set = new Set()
+  payloads.forEach((payload) => {
+    if (!payload || typeof payload !== 'object') return
+    collectKeysFromObject(set, payload.values)
+    collectKeysFromObject(set, payload.headerOverrides)
+    collectKeysFromObject(set, payload.sorts)
+    collectKeysFromObject(set, payload.fieldMeta)
+    if (Array.isArray(payload.filtersMeta)) {
+      payload.filtersMeta.forEach((meta) => {
+        if (meta?.key) set.add(String(meta.key).trim())
+      })
+    }
+    if (Array.isArray(payload.metricSettings)) {
+      payload.metricSettings.forEach((meta) => {
+        if (meta?.fieldKey) set.add(String(meta.fieldKey).trim())
+      })
+    }
+  })
+  return set
+}
+
+function collectKeysFromObject(target, source) {
+  if (!source || typeof source !== 'object') return
+  Object.keys(source).forEach((key) => {
+    const normalized = String(key).trim()
+    if (normalized) target.add(normalized)
+  })
 }
 
 function encodeFilterPayload() {
@@ -3464,8 +3592,11 @@ function encodeFilterPayload() {
       precision: Number.isFinite(metric.precision)
         ? Number(metric.precision)
         : 2,
+      outputFormat:
+        metric.outputFormat || (metric.type === 'formula' ? 'number' : 'auto'),
     })),
     filtersMeta: buildFiltersMetaSnapshot(),
+    fieldMeta: buildFieldMetaSnapshot(),
   })
 }
 
@@ -3505,6 +3636,31 @@ function buildFiltersMetaSnapshot() {
     label: getFieldDisplayNameByKey(key),
     values: collectFilterMetaValues(key),
   }))
+}
+
+function buildFieldMetaSnapshot(limit = 20) {
+  const meta = {}
+  fields.value.forEach((field) => {
+    if (!field?.key) return
+    const key = String(field.key).trim()
+    if (!key) return
+    const override = headerOverrides[key]
+    const dictionary = dictionaryLabelValue(key)
+    const label =
+      (override && override.trim()) ||
+      dictionary ||
+      field.label ||
+      humanizeKey(key)
+    meta[key] = {
+      label,
+      sample: field.sample || '—',
+      values: Array.isArray(field.values)
+        ? field.values.slice(0, limit)
+        : [],
+      type: field.type || 'string',
+    }
+  })
+  return meta
 }
 
 function collectFilterMetaValues(key) {
@@ -3550,6 +3706,7 @@ function mergeMetricSettings(remoteList = [], settings = []) {
             precision: Number.isFinite(saved.precision)
               ? Number(saved.precision)
               : 2,
+            outputFormat: saved.outputFormat || 'number',
           }),
         )
         return
@@ -3588,6 +3745,7 @@ function normalizeRemoteMetric(entry = {}, saved = null, index = 0) {
     enabled: saved?.enabled !== false,
     showRowTotals: saved?.showRowTotals !== false,
     showColumnTotals: saved?.showColumnTotals !== false,
+    outputFormat: saved?.outputFormat || 'auto',
     remoteMeta: {
       idMetricsComplex: entry?.idMetricsComplex,
       idFieldVal: entry?.idFieldVal,
@@ -3901,6 +4059,7 @@ async function saveCurrentConfig() {
         applyConfigRecord(refreshed)
       }
     }
+    await pageBuilderStore.fetchTemplates(true)
   } catch (err) {
     console.warn('Failed to save configuration', err)
   } finally {
@@ -3972,6 +4131,7 @@ async function savePresentation() {
         applyPresentationRecord(refreshed)
       }
     }
+    await pageBuilderStore.fetchTemplates(true)
     alert('Представление сохранено.')
   } catch (err) {
     console.warn('Failed to save report presentation', err)
@@ -4381,6 +4541,25 @@ function normalizeDictionaryUrl(value) {
     }
   }
   return value.trim()
+}
+
+function parseSourceBodyForJoins(rawBody = '') {
+  if (!rawBody?.trim()) {
+    return { cleanedBody: rawBody || EMPTY_BODY_TEMPLATE, joins: [] }
+  }
+  try {
+    const parsed = JSON.parse(rawBody)
+    const joins = Array.isArray(parsed.__joins) ? parsed.__joins : []
+    if ('__joins' in parsed) {
+      delete parsed.__joins
+    }
+    return {
+      cleanedBody: JSON.stringify(parsed, null, 2),
+      joins,
+    }
+  } catch {
+    return { cleanedBody: rawBody, joins: [] }
+  }
 }
 
 function buildBasePivotView() {
