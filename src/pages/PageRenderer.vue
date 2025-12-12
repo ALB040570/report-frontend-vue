@@ -363,7 +363,24 @@
                         "
                       ></span>
                     </td>
-                    <td v-for="cell in row.cells" :key="cell.key" class="cell">
+                    <td
+                      v-for="(cell, cellIndex) in row.cells"
+                      :key="cell.key"
+                      class="cell"
+                      :class="{
+                        'cell--clickable': canShowCellDetails(
+                          container,
+                          columnEntry(container, cellIndex),
+                        ),
+                      }"
+                      @click="
+                        handleCellDetails(
+                          container,
+                          row,
+                          columnEntry(container, cellIndex),
+                        )
+                      "
+                    >
                       <ConditionalCellValue
                         :display="cell.display"
                         :formatting="cell.formatting"
@@ -446,6 +463,7 @@
             <div v-else class="widget-placeholder">
               Нет данных для выбранного типа визуализации.
             </div>
+
           </template>
           <div v-else class="widget-placeholder">
             Нет данных для выбранной комбинации полей или фильтров.
@@ -458,6 +476,93 @@
     <p>Страница не найдена или удалена.</p>
     <button class="btn-outline" type="button" @click="goBack">Вернуться</button>
   </section>
+
+  <div
+    v-if="detailDialog.visible"
+    class="detail-overlay"
+    @click.self="closeDetailDialog"
+  >
+    <div class="detail-panel">
+      <header class="detail-panel__header">
+        <div>
+          <p class="detail-panel__eyebrow">Расшифровка значения</p>
+          <h3>{{ detailDialog.metricLabel }}</h3>
+          <p class="detail-panel__context">
+            {{ detailDialog.rowLabel || 'Все строки' }}
+            <span v-if="detailDialog.columnLabel">
+              • {{ detailDialog.columnLabel }}
+            </span>
+          </p>
+        </div>
+        <div class="detail-panel__actions">
+          <button
+            class="detail-panel__action"
+            type="button"
+            :disabled="!detailDialog.entries.length"
+            @click="exportDetailRecords"
+          >
+            Выгрузить
+          </button>
+          <button class="detail-panel__close" type="button" @click="closeDetailDialog">
+            ×
+          </button>
+        </div>
+      </header>
+      <section class="detail-panel__body">
+        <p class="detail-panel__meta">
+          {{ detailDialog.containerLabel }}
+          <span v-if="detailDialog.total">
+            •
+            {{ detailDialog.total }}
+            запис{{ detailDialog.total === 1 ? 'ь' : 'ей' }}
+            <template v-if="detailDialog.entries.length < detailDialog.total">
+              (показаны первые {{ detailDialog.entries.length }})
+            </template>
+          </span>
+        </p>
+        <div v-if="detailDialog.loading" class="detail-panel__placeholder">
+          Загружаем записи…
+        </div>
+        <p v-else-if="detailDialog.error" class="detail-panel__error">
+          {{ detailDialog.error }}
+        </p>
+        <template v-else>
+          <div v-if="detailDialog.entries.length" class="detail-table-wrapper">
+            <table class="detail-table">
+              <thead>
+                <tr>
+                  <th
+                    v-for="field in detailDialog.fields"
+                    :key="field.key"
+                    :class="{ 'is-number': isNumericField(field) }"
+                  >
+                    {{ field.label }}
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(entry, entryIndex) in detailDialog.entries"
+                  :key="`detail-${entryIndex}`"
+                >
+                  <td
+                    v-for="field in detailDialog.fields"
+                    :key="`${entryIndex}-${field.key}`"
+                    :class="{ 'is-number': isNumericField(field) }"
+                  >
+                    {{ formatDetailValue(entry[field.key]) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="detail-panel__empty">
+            Нет данных для выбранной ячейки.
+          </p>
+        </template>
+      </section>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -479,6 +584,7 @@ import {
   humanizeKey,
   augmentPivotViewWithFormulas,
   filterPivotViewByVisibility,
+  formatValue,
 } from '@/shared/lib/pivotUtils'
 import {
   applyConditionalFormattingToView,
@@ -543,6 +649,19 @@ const containerFilterRanges = reactive({})
 const containerRefreshTimers = reactive({})
 const containerTableSizing = reactive({})
 const containerRowCollapse = reactive({})
+const detailDialog = reactive({
+  visible: false,
+  containerId: '',
+  loading: false,
+  error: '',
+  entries: [],
+  fields: [],
+  total: 0,
+  containerLabel: '',
+  rowLabel: '',
+  columnLabel: '',
+  metricLabel: '',
+})
 const dataCache = reactive({})
 const defaultColumnWidth = 150
 const defaultRowHeight = 48
@@ -616,22 +735,23 @@ function dataSourceLabel(tpl) {
   return value
 }
 function containerState(id) {
-  if (!containerStates[id]) {
-    containerStates[id] = {
-      loading: false,
-      error: '',
-      view: null,
-      chart: null,
-      signature: '',
-      meta: {
-        rowTotalsAllowed: new Set(),
-        columnTotalsAllowed: new Set(),
-        metricGroups: [],
-        columnFieldRows: [],
-        rowHeaderTitle: 'Строки',
-      },
-    }
+if (!containerStates[id]) {
+  containerStates[id] = {
+    loading: false,
+    error: '',
+    view: null,
+    chart: null,
+    signature: '',
+    meta: {
+      rowTotalsAllowed: new Set(),
+      columnTotalsAllowed: new Set(),
+      metricGroups: [],
+      columnFieldRows: [],
+      rowHeaderTitle: 'Строки',
+    },
+    records: [],
   }
+}
   return containerStates[id]
 }
 function containerFilterStore(containerId) {
@@ -1043,6 +1163,164 @@ function flattenContainerRows(containerId, view) {
     cells: row.cells,
     totals: row.totals,
   }))
+}
+
+function containerColumns(container) {
+  return containerState(container.id).view?.columns || []
+}
+
+function columnEntry(container, index) {
+  return containerColumns(container)[index] || null
+}
+
+function canShowCellDetails(container, columnEntry) {
+  if (!columnEntry) return false
+  const metrics = containerState(container.id).meta?.metrics || []
+  const metric = metrics.find((item) => item.id === columnEntry.metricId)
+  return Boolean(metric && metric.type !== 'formula' && metric.fieldKey)
+}
+
+function closeDetailDialog() {
+  detailDialog.visible = false
+  detailDialog.containerId = ''
+  detailDialog.loading = false
+  detailDialog.error = ''
+  detailDialog.entries = []
+  detailDialog.fields = []
+  detailDialog.total = 0
+}
+
+function handleCellDetails(container, row, columnEntry) {
+  if (!columnEntry || !canShowCellDetails(container, columnEntry)) return
+  const tpl = template(container.templateId)
+  if (!tpl) return
+  const state = containerState(container.id)
+  const metrics = state.meta.metrics || []
+  const metric = metrics.find((item) => item.id === columnEntry.metricId)
+  if (!metric) return
+  detailDialog.visible = true
+  detailDialog.containerId = container.id
+  detailDialog.loading = true
+  detailDialog.error = ''
+  detailDialog.entries = []
+  detailDialog.total = 0
+  detailDialog.containerLabel =
+    container.title || tpl.name || 'Контейнер'
+  detailDialog.rowLabel = row.label || 'Все записи'
+  detailDialog.columnLabel = columnEntry.label || tpl.snapshot?.pivot?.columns?.join(' • ') || ''
+  detailDialog.metricLabel =
+    metric.label || metric.title || metric.fieldKey || 'Метрика'
+  detailDialog.fields = resolveDetailFieldDescriptors(tpl, metric)
+  const rowsPivot = tpl.snapshot?.pivot?.rows || []
+  const columnsPivot = tpl.snapshot?.pivot?.columns || []
+  const rowKey = row.key || '__all__'
+  const columnKey = columnEntry.baseKey || '__all__'
+  requestAnimationFrame(() => {
+    try {
+      const matched = (state.records || []).filter(
+        (record) =>
+          matchesDimensionPath(record, rowsPivot, rowKey) &&
+          matchesDimensionPath(record, columnsPivot, columnKey),
+      )
+      detailDialog.total = matched.length
+      detailDialog.entries = matched.slice(0, 200)
+      detailDialog.loading = false
+      if (!matched.length) {
+        detailDialog.error = 'Нет подробностей для этой ячейки.'
+      }
+    } catch (err) {
+      detailDialog.error =
+        err?.message || 'Не удалось собрать детализацию ячейки.'
+      detailDialog.loading = false
+    }
+  })
+}
+
+function matchesDimensionPath(record, dimensions = [], targetKey = '__all__') {
+  if (!targetKey || targetKey === '__all__') return true
+  const recordPath = buildDimensionPath(record, dimensions)
+  return recordPath.startsWith(targetKey)
+}
+
+function buildDimensionPath(record, dimensions = []) {
+  if (!Array.isArray(dimensions) || !dimensions.length) return '__all__'
+  let prefix = ''
+  dimensions.forEach((fieldKey) => {
+    const normalized = `${fieldKey}:${normalizeValue(record[fieldKey])}`
+    prefix = prefix ? `${prefix}|${normalized}` : normalized
+  })
+  return prefix || '__all__'
+}
+
+function resolveDetailFieldDescriptors(tpl, metric) {
+  if (!tpl) return []
+  const explicitFields = Array.isArray(metric?.detailFields)
+    ? metric.detailFields.filter(Boolean)
+    : []
+  const defaults = [
+    ...(tpl.snapshot?.pivot?.rows || []),
+    ...(tpl.snapshot?.pivot?.columns || []),
+    metric?.fieldKey,
+  ].filter(Boolean)
+  const fieldsSet = new Set(
+    (explicitFields.length ? explicitFields : defaults).filter(Boolean),
+  )
+  const fieldMeta = templateFieldMetaMap(tpl)
+  return Array.from(fieldsSet)
+    .filter(Boolean)
+    .map((key) => ({
+      key,
+      label:
+        tpl.snapshot?.options?.headerOverrides?.[key] ||
+        fieldMeta.get(key)?.label ||
+        humanizeKey(key),
+      type:
+        fieldMeta.get(key)?.type ||
+        (metric?.fieldKey === key ? 'number' : 'string'),
+    }))
+}
+
+function formatDetailValue(value) {
+  return formatValue(value)
+}
+
+function isNumericField(field) {
+  if (!field) return false
+  return field.type === 'number' || field.type === 'integer'
+}
+
+function exportDetailRecords() {
+  if (!detailDialog.entries.length || !detailDialog.fields.length) return
+  const header = detailDialog.fields.map((field) => field.label || field.key)
+  const rows = detailDialog.entries.map((entry) =>
+    detailDialog.fields.map((field) =>
+      formatDetailValue(entry?.[field.key]),
+    ),
+  )
+  const lines = [header, ...rows]
+    .map((cols) =>
+      cols
+        .map((value) => {
+          const str =
+            value === null || typeof value === 'undefined' ? '' : String(value)
+          if (str.includes('"') || str.includes(';') || str.includes('\n')) {
+            return `"${str.replace(/"/g, '""')}"`
+          }
+          return str
+        })
+        .join(';'),
+    )
+    .join('\n')
+  const blob = new Blob([lines], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  link.download = `detail-${timestamp}.csv`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
 }
 
 function includesNodeKey(node, key) {
@@ -1584,6 +1862,9 @@ function prepareMetrics(list = []) {
           : metric.type === 'formula'
             ? 2
             : 2,
+        detailFields: Array.isArray(metric.detailFields)
+          ? metric.detailFields.filter(Boolean)
+          : [],
       }
     })
 }
@@ -1744,6 +2025,7 @@ async function hydrateContainer(container) {
   state.error = ''
   state.view = null
   state.chart = null
+  state.records = []
   state.meta.rowTotalsAllowed = new Set()
   state.meta.columnTotalsAllowed = new Set()
   state.meta.metricGroups = []
@@ -1758,6 +2040,7 @@ async function hydrateContainer(container) {
       tpl.dataSource,
       container.id,
     )
+    state.records = filtered
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
     const rowTotalsAllowed = new Set(
       metrics
@@ -2920,6 +3203,145 @@ function editPage() {
 }
 .chart-container {
   min-height: 220px;
+}
+.cell--clickable {
+  cursor: pointer;
+}
+.cell--clickable:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+.detail-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  z-index: 1000;
+}
+.detail-panel {
+  background: #fff;
+  border-radius: 16px;
+  border: 1px solid #e2e8f0;
+  box-shadow:
+    0 18px 40px rgba(15, 23, 42, 0.18),
+    inset 0 0 0 1px rgba(148, 163, 184, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  width: min(100%, 1040px);
+  max-height: 90vh;
+}
+.detail-panel__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+.detail-panel__eyebrow {
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: #818cf8;
+  margin: 0 0 4px;
+}
+.detail-panel__context {
+  color: #475569;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+.detail-panel__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.detail-panel__action {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #312e81;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.detail-panel__action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.detail-panel__close {
+  border: none;
+  background: #e2e8f0;
+  color: #0f172a;
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  font-size: 20px;
+  cursor: pointer;
+}
+.detail-panel__meta {
+  font-size: 13px;
+  color: #475569;
+  margin-bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.detail-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.detail-panel__placeholder,
+.detail-panel__error,
+.detail-panel__empty {
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 16px;
+  font-size: 13px;
+  color: #475569;
+}
+.detail-panel__error {
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.detail-table-wrapper {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: auto;
+  max-height: 60vh;
+}
+.detail-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12.5px;
+  table-layout: fixed;
+}
+.detail-table th,
+.detail-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+  word-break: break-word;
+}
+.detail-table th {
+  font-weight: 600;
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.detail-table td {
+  color: #1f2937;
+}
+.detail-table .is-number {
+  text-align: right;
+  font-feature-settings: 'tnum' 1;
+}
+.detail-table tr:last-child td {
+  border-bottom: none;
 }
 </style>
   font-size: 13.5px;

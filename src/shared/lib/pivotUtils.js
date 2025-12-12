@@ -19,13 +19,17 @@ export function formatValue(value) {
   return String(value)
 }
 
-function formatMetricOutput(value, aggregator) {
+function formatMetricOutput(value, aggregator, format = 'auto', precision = 2) {
+  const override = format && format !== 'auto'
+  if (override) {
+    return formatFormulaValue(value, format, precision)
+  }
   if (aggregator === 'value') {
     if (value === null || typeof value === 'undefined' || value === '')
       return '—'
     return String(value)
   }
-  return formatNumber(value)
+  return formatNumber(value, precision)
 }
 
 export function formatFormulaValue(value, format = 'number', precision = 2) {
@@ -201,6 +205,10 @@ function flattenColumns(columnIndex, metrics) {
             ? `${column.label} • ${metric.label}`
             : metric.label,
         aggregator: metric.aggregator,
+        format: metric.outputFormat || 'auto',
+        precision: Number.isFinite(metric.precision)
+          ? Number(metric.precision)
+          : 2,
         levels: column.levels || [],
       })
     })
@@ -325,6 +333,10 @@ export function buildPivotView({
         metricId: metric.id,
         label: metric.label,
         aggregator: metric.aggregator,
+        format: metric.outputFormat || 'auto',
+        precision: Number.isFinite(metric.precision)
+          ? Number(metric.precision)
+          : 2,
       }))
 
   const rowsView = rowIndex.length
@@ -346,7 +358,12 @@ export function buildPivotView({
       }
       return {
         key: cellKey,
-        display: formatMetricOutput(value, column.aggregator),
+        display: formatMetricOutput(
+          value,
+          column.aggregator,
+          column.format,
+          column.precision,
+        ),
         value,
       }
     })
@@ -363,7 +380,12 @@ export function buildPivotView({
       }
       return {
         metricId: metric.id,
-        display: formatMetricOutput(value, metric.aggregator),
+        display: formatMetricOutput(
+          value,
+          metric.aggregator,
+          metric.outputFormat,
+          metric.precision,
+        ),
         value,
       }
     })
@@ -393,7 +415,12 @@ export function buildPivotView({
     }
     return {
       ...column,
-      totalDisplay: formatMetricOutput(value, column.aggregator),
+      totalDisplay: formatMetricOutput(
+        value,
+        column.aggregator,
+        column.format,
+        column.precision,
+      ),
       value,
       levels: column.levels || [],
     }
@@ -417,7 +444,12 @@ export function buildPivotView({
     }
     acc[metric.id] = {
       value,
-      display: formatMetricOutput(value, metric.aggregator),
+      display: formatMetricOutput(
+        value,
+        metric.aggregator,
+        metric.outputFormat,
+        metric.precision,
+      ),
     }
     return acc
   }, {})
@@ -491,7 +523,12 @@ function buildRowTree({
       }
       return {
         key: `${meta.pathKey}||${column.key}`,
-        display: formatMetricOutput(value, column.aggregator),
+        display: formatMetricOutput(
+          value,
+          column.aggregator,
+          column.format,
+          column.precision,
+        ),
         value,
       }
     })
@@ -508,7 +545,12 @@ function buildRowTree({
       }
       return {
         metricId: metric.id,
-        display: formatMetricOutput(value, metric.aggregator),
+        display: formatMetricOutput(
+          value,
+          metric.aggregator,
+          metric.outputFormat,
+          metric.precision,
+        ),
         value,
       }
     })

@@ -250,6 +250,9 @@ function normalizeMetrics(list = [], metricSettings = [], aggregatorMap) {
           conditionalFormatting: normalizeConditionalFormatting(
             saved?.conditionalFormatting,
           ),
+          detailFields: Array.isArray(saved?.detailFields)
+            ? saved.detailFields
+            : [],
         })
         return
       }
@@ -289,6 +292,9 @@ function buildNormalizedMetric(
       aggregatorMap,
     ) ||
     'sum'
+  const precision = Number.isFinite(saved?.precision)
+    ? Number(saved.precision)
+    : 2
   return {
     id: entry?.idMetricsComplex
       ? String(entry.idMetricsComplex)
@@ -297,11 +303,19 @@ function buildNormalizedMetric(
     fieldKey,
     aggregator,
     fieldLabel: saved?.title || entry?.FieldLabel || fieldKey,
+    outputFormat:
+      saved?.outputFormat ||
+      (saved?.type === 'formula' ? 'number' : 'auto') ||
+      'auto',
+    precision,
     showRowTotals: saved?.showRowTotals !== false,
     showColumnTotals: saved?.showColumnTotals !== false,
     conditionalFormatting: normalizeConditionalFormatting(
       saved?.conditionalFormatting,
     ),
+    detailFields: Array.isArray(saved?.detailFields)
+      ? saved.detailFields
+      : [],
     remoteMeta: entry || {},
   }
 }

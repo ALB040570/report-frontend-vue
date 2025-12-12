@@ -3336,6 +3336,9 @@ function createMetric(overrides = {}) {
     conditionalFormatting: normalizeConditionalFormatting(
       overrides.conditionalFormatting,
     ),
+    detailFields: Array.isArray(overrides.detailFields)
+      ? [...overrides.detailFields]
+      : [],
     remoteMeta: overrides.remoteMeta || null,
   }
 }
@@ -3853,6 +3856,9 @@ function encodeFilterPayload() {
       outputFormat:
         metric.outputFormat || (metric.type === 'formula' ? 'number' : 'auto'),
       conditionalFormatting: metric.conditionalFormatting,
+      detailFields: Array.isArray(metric.detailFields)
+        ? metric.detailFields
+        : [],
     })),
     filtersMeta: buildFiltersMetaSnapshot(),
     fieldMeta: buildFieldMetaSnapshot(),
@@ -3968,6 +3974,9 @@ function mergeMetricSettings(remoteList = [], settings = []) {
               : 2,
             outputFormat: saved.outputFormat || 'number',
             conditionalFormatting: saved?.conditionalFormatting,
+            detailFields: Array.isArray(saved?.detailFields)
+              ? [...saved.detailFields]
+              : [],
           }),
         )
         return
@@ -4008,6 +4017,9 @@ function normalizeRemoteMetric(entry = {}, saved = null, index = 0) {
     showColumnTotals: saved?.showColumnTotals !== false,
     outputFormat: saved?.outputFormat || 'auto',
     conditionalFormatting: saved?.conditionalFormatting,
+    detailFields: Array.isArray(saved?.detailFields)
+      ? [...saved.detailFields]
+      : [],
     remoteMeta: {
       idMetricsComplex: entry?.idMetricsComplex,
       idFieldVal: entry?.idFieldVal,
