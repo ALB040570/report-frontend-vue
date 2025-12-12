@@ -45,6 +45,7 @@
             type="button"
             aria-label="Открыть страницу"
             title="Открыть"
+            :disabled="!canInteractWithPage(page)"
             @click="previewPage(page.id)"
           >
             <span class="icon icon-eye" />
@@ -54,6 +55,7 @@
             type="button"
             aria-label="Редактировать страницу"
             title="Редактировать"
+            :disabled="!canInteractWithPage(page)"
             @click="editPage(page.id)"
           >
             <span class="icon icon-edit" />
@@ -63,6 +65,7 @@
             type="button"
             aria-label="Удалить страницу"
             title="Удалить"
+            :disabled="!canInteractWithPage(page)"
             @click="removePage(page.id)"
           >
             <span class="icon icon-trash" />
@@ -78,11 +81,14 @@ import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
+import { useAuthStore } from '@/shared/stores/auth'
 import { humanizeKey } from '@/shared/lib/pivotUtils'
+import { canUserAccessPage, readStoredUserMeta, resolveUserMeta } from '@/shared/lib/pageAccess'
 
 const router = useRouter()
 const store = usePageBuilderStore()
 const fieldDictionaryStore = useFieldDictionaryStore()
+const authStore = useAuthStore()
 
 const pages = computed(() => store.pages)
 const pagesLoading = computed(() => store.pagesLoading)
@@ -90,6 +96,11 @@ const pagesError = computed(() => store.pagesError)
 const layoutLabels = computed(() => store.layoutLabelMap)
 const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
 const dictionaryLabelsLower = computed(() => fieldDictionaryStore.labelMapLower || {})
+const currentUserMeta = computed(() => {
+  const personal = resolveUserMeta(authStore.personalInfo)
+  if (personal) return personal
+  return readStoredUserMeta()
+})
 
 onMounted(() => {
   store.fetchPages(true)
@@ -127,13 +138,27 @@ function resolveFieldLabel(key) {
 function createPage() {
   router.push('/pages/new')
 }
+function canInteractWithPage(page) {
+  return canUserAccessPage(page, currentUserMeta.value)
+}
+function ensurePageAccess(pageId) {
+  const page = store.getPageById(pageId)
+  if (page && canInteractWithPage(page)) {
+    return true
+  }
+  alert('Нет доступа к этой странице.')
+  return false
+}
 function editPage(pageId) {
+  if (!ensurePageAccess(pageId)) return
   router.push(`/pages/${pageId}/edit`)
 }
 function previewPage(pageId) {
+  if (!ensurePageAccess(pageId)) return
   router.push(`/dash/${pageId}`)
 }
 async function removePage(pageId) {
+  if (!ensurePageAccess(pageId)) return
   if (confirm('Удалить страницу?')) {
     try {
       await store.removePage(pageId)

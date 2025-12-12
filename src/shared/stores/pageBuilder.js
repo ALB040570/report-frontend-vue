@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { fetchFactorValues } from '@/shared/api/objects'
+import { fetchFactorValues, fetchPersonnelAccessList } from '@/shared/api/objects'
 import {
   deleteObjectWithProperties,
   loadReportPages,
@@ -8,10 +8,12 @@ import {
   deleteComplexEntity,
 } from '@/shared/api/report'
 import { fetchReportViewTemplates } from '@/shared/services/reportViews'
+import { canUserAccessPage } from '@/shared/lib/pageAccess'
 
 const LAYOUT_FACTOR_CODE = 'Prop_Layout'
 const WIDTH_FACTOR_CODE = 'Prop_Width'
 const HEIGHT_FACTOR_CODE = 'Prop_Height'
+const PRIVACY_FACTOR_CODE = 'Prop_Private'
 
 const filterLibrary = [
   {
@@ -67,6 +69,14 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
     heightLoading: false,
     heightLoaded: false,
     heightError: '',
+    privacyOptions: [],
+    privacyLoading: false,
+    privacyLoaded: false,
+    privacyError: '',
+    pageUsers: [],
+    pageUsersLoading: false,
+    pageUsersLoaded: false,
+    pageUsersError: '',
   }),
   getters: {
     getPageById: (state) => (id) => state.pages.find((page) => page.id === id),
@@ -157,12 +167,45 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
         this.heightLoading = false
       }
     },
+    async fetchPrivacyOptions(force = false) {
+      if (this.privacyLoading || (this.privacyLoaded && !force)) return
+      this.privacyLoading = true
+      this.privacyError = ''
+      try {
+        const records = await fetchFactorValues(PRIVACY_FACTOR_CODE)
+        this.privacyOptions = normalizePrivacyOptions(records)
+        this.privacyLoaded = true
+      } catch (err) {
+        console.warn('Failed to load privacy options', err)
+        this.privacyError = 'Не удалось загрузить параметры публичности.'
+        this.privacyOptions = []
+      } finally {
+        this.privacyLoading = false
+      }
+    },
+    async fetchPageUsers(force = false) {
+      if (this.pageUsersLoading || (this.pageUsersLoaded && !force)) return
+      this.pageUsersLoading = true
+      this.pageUsersError = ''
+      try {
+        const records = await fetchPersonnelAccessList()
+        this.pageUsers = normalizeAccessUsers(records)
+        this.pageUsersLoaded = true
+      } catch (err) {
+        console.warn('Failed to load page users', err)
+        this.pageUsersError = 'Не удалось загрузить список пользователей.'
+        this.pageUsers = []
+      } finally {
+        this.pageUsersLoading = false
+      }
+    },
     async ensureReferences() {
       await Promise.all([
         this.fetchLayoutOptions(),
         this.fetchWidthOptions(),
         this.fetchHeightOptions(),
         this.fetchTemplates(),
+        this.fetchPrivacyOptions(),
       ])
     },
     async fetchPages(force = false) {
@@ -175,11 +218,12 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
           this.fetchTemplates(),
           this.fetchWidthOptions(),
           this.fetchHeightOptions(),
+          this.fetchPrivacyOptions(),
         ])
         const records = await loadReportPages()
         const containersMap = new Map()
         this.pages = (records || []).map((entry, index) => {
-          const page = normalizePageRecord(entry, index, this.layoutOptions)
+          const page = normalizePageRecord(entry, index, this.layoutOptions, this.privacyOptions)
           const containers = normalizeComplexContainers(
             entry?.complex || [],
             this.templates,
@@ -252,6 +296,16 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
         UpdatedAt: now,
         objUser: userMeta.objUser,
         pvUser: userMeta.pvUser,
+      }
+      payload.objUserMulti = []
+      const privacyMeta = normalizeDraftPrivacy(draft, this.privacyOptions)
+      if (privacyMeta) {
+        payload.fvPrivate = privacyMeta.fv
+        payload.pvPrivate = privacyMeta.pv
+        payload.objUserMulti = privacyMeta.users
+        if (privacyMeta.id) {
+          payload.idPrivate = privacyMeta.id
+        }
       }
       if (operation === 'upd') {
         if (!resolvedRawId) {
@@ -394,6 +448,11 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
     async removePage(pageId) {
       const remoteId = toNumericId(pageId)
       if (!remoteId) return
+      const userMeta = readUserMeta()
+      const page = this.getPageById(String(pageId))
+      if (page && !canUserAccessPage(page, userMeta)) {
+        throw new Error('Недостаточно прав для удаления этой страницы.')
+      }
       try {
         await deleteObjectWithProperties(remoteId)
         this.pages = this.pages.filter((page) => page.id !== String(pageId))
@@ -405,9 +464,10 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
   },
 })
 
-function normalizePageRecord(entry = {}, index = 0, layoutOptions = []) {
+function normalizePageRecord(entry = {}, index = 0, layoutOptions = [], privacyOptions = []) {
   const remoteId = toStableId(entry?.id ?? entry?.Id ?? entry?.ID)
   const layoutMeta = findLayoutByCodes(layoutOptions, entry?.fvLayout, entry?.pvLayout)
+  const privacy = normalizePrivacyRecord(entry, privacyOptions)
   return {
     id: remoteId || `page-${index}`,
     remoteId,
@@ -423,6 +483,10 @@ function normalizePageRecord(entry = {}, index = 0, layoutOptions = []) {
       pvLayout: layoutMeta?.pv || toNumericId(entry?.pvLayout),
       containers: [],
     },
+    privacy,
+    isPrivate: Boolean(privacy?.isPrivate),
+    objUser: toNumericId(entry?.objUser ?? entry?.ObjUser),
+    pvUser: toNumericId(entry?.pvUser ?? entry?.PvUser),
     remoteMeta: entry || {},
   }
 }
@@ -456,6 +520,34 @@ function normalizeSizeOptions(records = [], type = 'width') {
       fv,
       pv,
       css: type === 'width' ? resolveWidthCss(label) : resolveHeightCss(label),
+      raw: record,
+    }
+  })
+}
+
+function normalizePrivacyOptions(records = []) {
+  return (records || []).map((record, index) => {
+    const fv = toNumericId(record?.fv ?? record?.id)
+    const pv = toNumericId(record?.pv)
+    const label = record?.name || record?.Name || `Опция ${index + 1}`
+    const normalized = (label || '').toString().trim().toLowerCase()
+    const isPrivate =
+      normalized === 'нет' ||
+      normalized === 'no' ||
+      normalized.includes('не пуб') ||
+      normalized.includes('приват')
+    const isPublic =
+      normalized === 'да' ||
+      normalized === 'yes' ||
+      normalized.includes('публ') ||
+      normalized.includes('общ')
+    return {
+      id: toStableId(record?.id) || `privacy-${index}`,
+      fv,
+      pv,
+      label,
+      isPrivate,
+      isPublic,
       raw: record,
     }
   })
@@ -500,6 +592,89 @@ function normalizeComplexContainers(records = [], templates = [], widthOptions =
       heightOptions,
     ),
   )
+}
+
+function normalizeAccessUsers(records = []) {
+  if (!Array.isArray(records)) return []
+  return records
+    .map((record) => {
+      const id = toNumericId(record?.id ?? record?.objUser)
+      const pv = toNumericId(record?.pv ?? record?.pvUser)
+      if (!Number.isFinite(id) || !Number.isFinite(pv)) {
+        return null
+      }
+      const cls = toNumericId(record?.cls ?? record?.Cls)
+      return {
+        id,
+        pv,
+        cls: Number.isFinite(cls) ? cls : null,
+        name: record?.name || record?.Name || record?.fullName || '',
+        fullName: record?.fullName || record?.FullName || record?.name || '',
+      }
+    })
+    .filter(Boolean)
+}
+
+function normalizePrivacyRecord(entry = {}, privacyOptions = []) {
+  const fv = toNumericId(entry?.fvPrivate ?? entry?.FvPrivate)
+  const pv = toNumericId(entry?.pvPrivate ?? entry?.PvPrivate)
+  const id = toNumericId(entry?.idPrivate ?? entry?.IdPrivate)
+  const optionsMap = new Map((privacyOptions || []).map((option) => [option.fv, option]))
+  const option = fv != null ? optionsMap.get(fv) : null
+  const label = entry?.namePrivate || entry?.NamePrivate || option?.label || ''
+  const isPrivate = option ? Boolean(option.isPrivate) : interpretPrivacyLabel(label)
+  const users = normalizeAccessUsers(entry?.objUserMulti)
+  return {
+    id,
+    fv,
+    pv,
+    label,
+    isPrivate,
+    users,
+  }
+}
+
+function sanitizeUserAccessList(list = []) {
+  if (!Array.isArray(list)) return []
+  return list
+    .map((record) => {
+      const id = toNumericId(record?.id ?? record?.objUser)
+      const pv = toNumericId(record?.pv ?? record?.pvUser)
+      if (!Number.isFinite(id) || !Number.isFinite(pv)) {
+        return null
+      }
+      const cls = toNumericId(record?.cls ?? record?.Cls)
+      return {
+        id,
+        pv,
+        cls: Number.isFinite(cls) ? cls : null,
+        name: record?.name || record?.Name || record?.fullName || '',
+        fullName: record?.fullName || record?.FullName || record?.name || '',
+      }
+    })
+    .filter(Boolean)
+}
+
+function normalizeDraftPrivacy(draft = {}, privacyOptions = []) {
+  const fv = toNumericId(draft?.fvPrivate)
+  if (fv === null) return null
+  const option = (privacyOptions || []).find((item) => item.fv === fv)
+  const pv = toNumericId(draft?.pvPrivate) || option?.pv || null
+  const id = toNumericId(draft?.idPrivate)
+  return {
+    fv,
+    pv,
+    id,
+    users: sanitizeUserAccessList(draft?.objUserMulti),
+  }
+}
+
+function interpretPrivacyLabel(label = '') {
+  const normalized = label.toString().trim().toLowerCase()
+  if (!normalized) return false
+  if (normalized === 'нет' || normalized === 'no') return true
+  if (normalized.includes('не пуб') || normalized.includes('приват')) return true
+  return false
 }
 
 function collectRemovedContainerIds(existingContainers = [], incomingContainers = []) {

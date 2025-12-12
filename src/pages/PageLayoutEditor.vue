@@ -31,13 +31,58 @@
         <textarea v-model="draft.description" rows="3" placeholder="Короткое описание страницы"></textarea>
       </label>
 
+      <div class="field">
+        <span>Публичная страница</span>
+        <n-radio-group
+          v-model:value="draft.fvPrivate"
+          :disabled="privacyLoading || !privacyOptions.length"
+        >
+          <n-radio-button
+            v-for="option in privacyOptions"
+            :key="option.id || option.fv"
+            :value="option.fv"
+          >
+            {{ option.label }}
+          </n-radio-button>
+        </n-radio-group>
+        <p v-if="privacyLoading" class="muted">Загружаем варианты…</p>
+        <p v-else-if="!privacyOptions.length" class="muted">
+          Нет данных для настройки публичности.
+        </p>
+        <p v-if="privacyError" class="error-text">{{ privacyError }}</p>
+      </div>
+
+      <div v-if="isPrivateSelection" class="field">
+        <span>Пользователи с доступом</span>
+        <n-select
+          v-model:value="selectedUserIds"
+          multiple
+          filterable
+          clearable
+          size="large"
+          :options="pageUserOptions"
+          :loading="pageUsersLoading"
+          placeholder="Выберите пользователей"
+        />
+        <p v-if="pageUsersLoading" class="muted">Загружаем пользователей…</p>
+        <p v-else-if="!pageUsers.length" class="muted">Нет доступных пользователей.</p>
+        <p class="muted">Только выбранные сотрудники смогут открыть страницу.</p>
+        <p v-if="pageUsersError" class="error-text">{{ pageUsersError }}</p>
+      </div>
+
       <fieldset class="field">
         <legend>Глобальные фильтры</legend>
-        <div v-if="availableFilterOptions.length" class="filter-grid">
-          <label v-for="filter in availableFilterOptions" :key="filter.key" class="checkbox">
-            <input v-model="draft.filters" type="checkbox" :value="filter.key" />
-            <span>{{ filter.label }}</span>
-          </label>
+        <div v-if="availableFilterOptions.length" class="filter-multiselect">
+          <n-select
+            v-model:value="draft.filters"
+            multiple
+            filterable
+            clearable
+            size="large"
+            placeholder="Выберите фильтры"
+            :options="globalFilterSelectOptions"
+          />
+          <p class="muted">Только поля, общие для всех контейнеров, доступны для выбора.</p>
         </div>
         <p v-else class="muted">
           Добавьте контейнеры с общими полями, чтобы выбрать фильтры страницы.
@@ -142,12 +187,16 @@ import { computed, reactive, ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
+import { useAuthStore } from '@/shared/stores/auth'
 import { humanizeKey } from '@/shared/lib/pivotUtils'
+import { canUserAccessPage, readStoredUserMeta, resolveUserMeta } from '@/shared/lib/pageAccess'
+import { NRadioGroup, NRadioButton, NSelect } from 'naive-ui'
 
 const router = useRouter()
 const route = useRoute()
 const store = usePageBuilderStore()
 const fieldDictionaryStore = useFieldDictionaryStore()
+const authStore = useAuthStore()
 
 const pageId = computed(() => route.params.pageId)
 const isNew = computed(() => pageId.value === 'new' || !pageId.value)
@@ -164,6 +213,10 @@ const draft = reactive({
   pageTitle: '',
   description: '',
   filters: [],
+  fvPrivate: null,
+  pvPrivate: null,
+  idPrivate: null,
+  objUserMulti: [],
   layout: {
     preset: '',
     containers: [],
@@ -177,6 +230,12 @@ const showTemplatesLoading = computed(() => templatesLoading.value && !templates
 const layoutOptions = computed(() => store.layoutOptions)
 const widthOptions = computed(() => store.widthOptions)
 const heightOptions = computed(() => store.heightOptions)
+const privacyOptions = computed(() => store.privacyOptions || [])
+const privacyLoading = computed(() => store.privacyLoading)
+const privacyError = computed(() => store.privacyError)
+const pageUsers = computed(() => store.pageUsers || [])
+const pageUsersLoading = computed(() => store.pageUsersLoading)
+const pageUsersError = computed(() => store.pageUsersError)
 const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
 const dictionaryLabelsLower = computed(() => fieldDictionaryStore.labelMapLower || {})
 const commonFilterKeys = computed(() =>
@@ -188,6 +247,66 @@ const availableFilterOptions = computed(() =>
     label: resolveFieldLabel(key),
   })),
 )
+const globalFilterSelectOptions = computed(() =>
+  availableFilterOptions.value.map((filter) => ({
+    value: filter.key,
+    label: filter.label,
+  })),
+)
+const selectedPrivacyOption = computed(() =>
+  privacyOptions.value.find((option) => option.fv === draft.fvPrivate) || null,
+)
+const isPrivateSelection = computed(() => Boolean(selectedPrivacyOption.value?.isPrivate))
+const pageUsersMap = computed(() => {
+  const map = new Map()
+  pageUsers.value.forEach((user) => {
+    if (user?.id != null) {
+      map.set(user.id, user)
+    }
+  })
+  return map
+})
+const pageUserOptions = computed(() =>
+  pageUsers.value.map((user) => ({
+    value: user.id,
+    label: user.fullName || user.name,
+  })),
+)
+const selectedUserIds = computed({
+  get() {
+    return draft.objUserMulti
+      .map((entry) => entry?.id)
+      .filter((value) => value != null)
+  },
+  set(values) {
+    const normalized = Array.isArray(values) ? values : []
+    const uniqueIds = [
+      ...new Set(
+        normalized
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value)),
+      ),
+    ]
+    draft.objUserMulti = uniqueIds
+      .map((id) => {
+        const option = pageUsersMap.value.get(id)
+        if (!option) return null
+        return {
+          id: option.id,
+          cls: option.cls,
+          name: option.name,
+          fullName: option.fullName,
+          pv: option.pv,
+        }
+      })
+      .filter(Boolean)
+  },
+})
+const currentUserMeta = computed(() => {
+  const personal = resolveUserMeta(authStore.personalInfo)
+  if (personal) return personal
+  return readStoredUserMeta()
+})
 
 watch(layoutOptions, (options) => {
   if (!draft.layout.preset && options.length) {
@@ -218,6 +337,39 @@ watch(availableFilterOptions, (options) => {
   draft.filters = draft.filters.filter((key) => allowed.has(key))
 })
 
+watch(
+  privacyOptions,
+  (options) => {
+    if (!options.length) return
+    const current = options.find((option) => option.fv === draft.fvPrivate)
+    if (current) {
+      draft.pvPrivate = current.pv
+      return
+    }
+    const fallback = options.find((option) => option.isPublic) || options[0]
+    draft.fvPrivate = fallback?.fv ?? null
+    draft.pvPrivate = fallback?.pv ?? null
+  },
+  { immediate: true },
+)
+
+watch(
+  () => draft.fvPrivate,
+  (next) => {
+    if (next == null) return
+    const option = privacyOptions.value.find((item) => item.fv === next)
+    if (option) {
+      draft.pvPrivate = option.pv
+    }
+  },
+)
+
+watch(isPrivateSelection, (next) => {
+  if (!next && draft.objUserMulti.length) {
+    draft.objUserMulti = []
+  }
+})
+
 onMounted(async () => {
   try {
     await Promise.all([
@@ -226,6 +378,8 @@ onMounted(async () => {
       store.fetchHeightOptions(),
       store.fetchTemplates(true),
       store.fetchPages(true),
+      store.fetchPrivacyOptions(),
+      store.fetchPageUsers(),
       fieldDictionaryStore.fetchDictionary(),
     ])
     if (!isNew.value) {
@@ -248,6 +402,10 @@ async function loadExistingPage() {
     loadError.value = 'Страница не найдена или удалена.'
     return
   }
+  if (!canUserAccessPage(existing, currentUserMeta.value)) {
+    loadError.value = 'У вас нет доступа к этой странице.'
+    return
+  }
   draft.id = existing.id
   draft.remoteId = existing.remoteId || existing.id
   draft.remoteMeta = existing.remoteMeta || {}
@@ -255,6 +413,12 @@ async function loadExistingPage() {
   draft.pageTitle = existing.pageTitle || ''
   draft.description = existing.description || ''
   draft.filters = [...(existing.filters || [])]
+  draft.fvPrivate = existing.privacy?.fv ?? null
+  draft.pvPrivate = existing.privacy?.pv ?? null
+  draft.idPrivate = existing.privacy?.id ?? null
+  draft.objUserMulti = Array.isArray(existing.privacy?.users)
+    ? existing.privacy.users.map((user) => ({ ...user }))
+    : []
   draft.layout.preset = existing.layout?.preset || layoutOptions.value[0]?.value || ''
   const containers = await store.fetchPageContainers(existing.id, true)
   draft.layout.containers.splice(0, draft.layout.containers.length)
@@ -397,6 +561,14 @@ function goBack() {
   border-radius: 10px;
   padding: 10px 12px;
   font-size: 14px;
+}
+.field select[multiple] {
+  min-height: 140px;
+}
+.filter-multiselect {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 .filter-grid {
   display: flex;

@@ -1,5 +1,5 @@
 <template>
-  <section v-if="page" class="page">
+  <section v-if="page && canViewPage" class="page">
     <header class="page__header">
       <div>
         <h1>{{ page.pageTitle }}</h1>
@@ -472,6 +472,15 @@
       </article>
     </div>
   </section>
+  <section v-else-if="page" class="page page__restricted">
+    <div class="page__restricted-card">
+      <h2>Нет доступа к странице</h2>
+      <p class="muted">
+        Эта страница доступна только автору или пользователям, которых он отметил при сохранении.
+      </p>
+      <button class="btn-outline" type="button" @click="goBack">К списку страниц</button>
+    </div>
+  </section>
   <section v-else class="page">
     <p>Страница не найдена или удалена.</p>
     <button class="btn-outline" type="button" @click="goBack">Вернуться</button>
@@ -572,6 +581,7 @@ import {
   usePageBuilderStore,
   resolveCommonContainerFieldKeys,
 } from '@/shared/stores/pageBuilder'
+import { useAuthStore } from '@/shared/stores/auth'
 import { fetchPlanRecords } from '@/shared/api/plan'
 import { fetchParameterRecords } from '@/shared/api/parameter'
 import { sendDataSourceRequest } from '@/shared/api/dataSource'
@@ -598,10 +608,18 @@ import {
   fetchJoinPayload,
   parseJoinConfig,
 } from '@/shared/lib/sourceJoins.js'
+import {
+  canUserAccessPage,
+  isPagePrivate,
+  matchUserAccess,
+  readStoredUserMeta,
+  resolveUserMeta,
+} from '@/shared/lib/pageAccess'
 const route = useRoute()
 const router = useRouter()
 const store = usePageBuilderStore()
 const fieldDictionaryStore = useFieldDictionaryStore()
+const authStore = useAuthStore()
 const pageId = computed(() => route.params.pageId)
 const page = computed(() => store.getPageById(pageId.value))
 const pageContainers = computed(
@@ -619,6 +637,7 @@ onMounted(async () => {
   await Promise.all([
     store.fetchTemplates(true),
     store.fetchPages(true),
+    store.fetchPrivacyOptions(),
     fieldDictionaryStore.fetchDictionary(),
   ])
   if (pageId.value) {
@@ -630,7 +649,11 @@ watch(
   () => pageId.value,
   async (next) => {
     if (next) {
-      await Promise.all([store.fetchPages(true), store.fetchTemplates(true)])
+      await Promise.all([
+        store.fetchPages(true),
+        store.fetchTemplates(true),
+        store.fetchPrivacyOptions(),
+      ])
       await store.fetchPageContainers(next, true)
     }
   },
@@ -718,6 +741,35 @@ const activePageFilterKeySet = computed(
 )
 const globalFilterValueMap = computed(() => buildGlobalFilterValueMap())
 const globalFilterRangeDefaults = computed(() => buildGlobalFilterRangeMap())
+const currentUserMeta = computed(() => {
+  const personal = resolveUserMeta(authStore.personalInfo)
+  if (personal) return personal
+  return readStoredUserMeta()
+})
+const currentObjUser = computed(() => currentUserMeta.value?.objUser ?? null)
+const currentPvUser = computed(() => currentUserMeta.value?.pvUser ?? null)
+const isPrivatePage = computed(() => isPagePrivate(page.value))
+const isPageAuthor = computed(() =>
+  matchUserAccess(
+    currentObjUser.value,
+    currentPvUser.value,
+    page.value?.objUser,
+    page.value?.pvUser,
+  ),
+)
+const isWhitelistedUser = computed(() => {
+  const list = page.value?.privacy?.users
+  if (!Array.isArray(list)) return false
+  return list.some((user) =>
+    matchUserAccess(
+      currentObjUser.value,
+      currentPvUser.value,
+      user?.id,
+      user?.pv,
+    ),
+  )
+})
+const canViewPage = computed(() => canUserAccessPage(page.value, currentUserMeta.value))
 let refreshTimer = null
 const pageRefreshing = ref(false)
 const exportingExcel = ref(false)
@@ -2792,6 +2844,22 @@ function editPage() {
   width: 100%;
   max-width: 1600px;
   margin: 0 auto;
+}
+.page__restricted {
+  min-height: 60vh;
+  align-items: center;
+  justify-content: center;
+}
+.page__restricted-card {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 32px;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  text-align: center;
 }
 .page__header {
   display: flex;
