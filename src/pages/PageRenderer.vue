@@ -163,7 +163,7 @@
           </div>
           <template v-else-if="containerState(container.id).view">
             <div v-if="isTableVisualization(container)" class="pivot-wrapper">
-              <table class="pivot-table">
+              <table class="pivot-table table-density--standard">
                 <thead>
                   <tr v-if="hasMetricGroups(container)" class="metric-header">
                     <th
@@ -322,8 +322,9 @@
                       <th
                         v-for="total in containerRowTotalHeaders(container)"
                         :key="`row-total-${total.metricId}`"
+                        class="column-field-group column-field-group--total"
                       >
-                        {{ total.label }}
+                        ИТОГО
                       </th>
                     </template>
                   </tr>
@@ -390,7 +391,7 @@
                 >
                   <tr>
                     <td v-if="shouldShowColumnTotals(container)">
-                      Итого по столбцам
+                      ИТОГО
                     </td>
                     <template v-if="shouldShowColumnTotals(container)">
                       <td
@@ -2501,10 +2502,13 @@ function editPage() {
 
 <style scoped>
 .page {
-  padding: 24px;
+  padding: 24px clamp(16px, 4vw, 48px);
   display: flex;
   flex-direction: column;
   gap: 24px;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
 }
 .page__header {
   display: flex;
@@ -2515,8 +2519,11 @@ function editPage() {
 .page__actions {
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
+}
+.page__actions > * {
+  flex-shrink: 0;
 }
 .btn-outline--icon {
   display: inline-flex;
@@ -2598,10 +2605,10 @@ function editPage() {
   font-size: 12px;
 }
 .widget-body {
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 18px;
   padding: 12px;
-  background: #fff;
+  background: #f8fafc;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2689,7 +2696,14 @@ function editPage() {
   font-size: 13px;
 }
 .pivot-wrapper {
-  overflow: auto;
+  overflow-x: auto;
+  border: 1px solid #dfe7f5;
+  border-radius: 18px;
+  background: #fff;
+  padding: 4px;
+  box-shadow:
+    inset 0 0 0 1px rgba(148, 163, 184, 0.08),
+    0 8px 24px rgba(15, 23, 42, 0.06);
 }
 .row-header-title {
   font-weight: 600;
@@ -2704,28 +2718,84 @@ function editPage() {
   position: relative;
 }
 .column-field-value {
-  display: block;
-  font-size: 14px;
-  color: #111827;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.35;
+  word-break: break-word;
+  max-height: 4.05em;
 }
 .pivot-table {
+  --cell-padding-y: 12px;
+  --cell-padding-x: 12px;
+  --group-divider-color: rgba(148, 163, 184, 0.18);
+  --row-divider-color: rgba(203, 213, 225, 0.5);
+  --row-hover-color: rgba(148, 163, 184, 0.12);
+  --column-hover-color: rgba(37, 99, 235, 0.08);
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12.5px;
+  line-height: 1.25;
+  background: #fff;
+  color: #1f2937;
+  font-feature-settings: 'tnum' 1;
+}
+.pivot-table.table-density--compact {
+  --cell-padding-y: 10px;
+  --cell-padding-x: 10px;
+  font-size: 12px;
 }
 .pivot-table th,
 .pivot-table td {
-  border: 1px solid #e5e7eb;
-  padding: 6px 8px;
-  text-align: right;
+  padding: var(--cell-padding-y) var(--cell-padding-x);
+  border: none;
+  position: relative;
+  transition: background 140ms ease, color 140ms ease;
+  overflow: visible;
+  z-index: 0;
+}
+.pivot-table th {
+  text-align: center;
+  vertical-align: top;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.pivot-table thead th {
+  background: #f8fafc;
+  color: rgba(15, 23, 42, 0.85);
+  border-bottom: 1px solid #d9e2f1;
+  font-size: 13.5px;
+}
+.pivot-table td,
+.pivot-table th {
+  font-weight: 500;
 }
 .pivot-table th:first-child,
 .pivot-table td:first-child {
   text-align: left;
 }
+.pivot-table tr > :nth-child(2) {
+  padding-left: calc(var(--cell-padding-x) + 6px);
+}
 .pivot-table .row-label {
-  font-weight: 500;
+  font-weight: 600;
   position: relative;
+  background: #f9fafb;
+  border-right: 1px solid #edf2f7;
+  color: #0f172a;
+}
+.pivot-table tbody td {
+  text-align: right;
+  color: #1f2937;
+  background: rgba(255, 255, 255, 0.98);
+}
+.pivot-table tbody td,
+.pivot-table tbody .row-label {
+  border-top: 1px solid var(--row-divider-color);
 }
 .row-tree {
   display: flex;
@@ -2752,8 +2822,128 @@ function editPage() {
 .pivot-table .total,
 .pivot-table .grand-total {
   font-weight: 600;
+  border-top: 2px solid #cbd5f5;
+  color: #1d4ed8;
+  box-shadow: inset 0 3px 6px rgba(15, 23, 42, 0.04);
+  padding-left: calc(var(--cell-padding-x) + 6px);
+  border-left: 1px solid var(--group-divider-color);
+}
+.pivot-table tbody tr:hover td,
+.pivot-table tbody tr:hover .row-label {
+  background: var(--row-hover-color);
+}
+.pivot-table tr > :is(th, td)::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  right: -4px;
+  background: transparent;
+  pointer-events: none;
+  z-index: -1;
+}
+.pivot-table tr > :nth-child(2)::before,
+.pivot-table tr > :last-child::before {
+  background: var(--group-divider-color);
+}
+.pivot-table td.total::before,
+.pivot-table td.grand-total::before,
+.pivot-table th.column-field-group--total::before,
+.pivot-table th.grand-total::before {
+  background: var(--group-divider-color);
+}
+.pivot-table td::after,
+.pivot-table th::after {
+  content: '';
+  position: absolute;
+  top: -9999px;
+  bottom: -9999px;
+  left: 0;
+  right: 0;
+  background: transparent;
+  transition: background 140ms ease;
+  pointer-events: none;
+  z-index: -1;
+}
+.pivot-table td:hover::after,
+.pivot-table th:hover::after {
+  background: var(--column-hover-color);
+}
+.pivot-table td:focus-within,
+.pivot-table td:focus-within::after {
+  background: rgba(37, 99, 235, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.4);
+}
+.pivot-table input {
+  width: 100%;
+  border: 1px solid transparent;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 4px 0;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+  font-feature-settings: 'tnum' 1;
+}
+.pivot-table input:focus {
+  outline: none;
+  border-bottom-color: #1d4ed8;
+}
+.pivot-table input::placeholder {
+  color: #94a3b8;
+}
+.pivot-table tbody td.disabled {
+  opacity: 0.5;
+}
+.pivot-table.table-density--standard {
+  font-size: 12.5px;
+}
+@media (max-width: 1200px) {
+  .pivot-table {
+    --cell-padding-y: 10px;
+    --cell-padding-x: 10px;
+    font-size: 12px;
+  }
+}
+@media (max-width: 768px) {
+  .pivot-wrapper {
+    border-radius: 12px;
+  }
+  .pivot-table {
+    font-size: 12px;
+  }
+}
+@media (max-width: 900px) {
+  .page__actions {
+    flex-wrap: wrap;
+  }
 }
 .chart-container {
   min-height: 220px;
 }
 </style>
+  font-size: 13.5px;
+  color: rgba(15, 23, 42, 0.85);
+  padding-bottom: 4px;
+}
+.metric-header .column-field-group {
+  font-size: 13.5px;
+  color: rgba(15, 23, 42, 0.9);
+  text-transform: none;
+}
+.column-field-group:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  right: 0;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.15);
+}
+.column-field-group--total::after {
+  display: none;
+}
+.column-field-group--total {
+  border-left: 1px solid rgba(148, 163, 184, 0.15);
+  padding-left: 14px;
+}
