@@ -293,7 +293,7 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
       const operation = resolvedRawId ? 'upd' : 'ins'
       const now = new Date().toISOString().slice(0, 10)
       const normalizedDescription = draft.description?.trim() || ''
-      const initialContainerTabs = buildContainerTabMap(draft.layout?.containers || [])
+      const initialContainerTabs = sanitizeContainerTabMap(draft.layout?.containerTabs || {})
       const payload = createBasePagePayload(
         draft,
         layoutMeta,
