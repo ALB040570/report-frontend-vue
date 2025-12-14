@@ -73,9 +73,24 @@
       </div>
     </div>
 
+    <div v-if="tabOptions.length > 1" class="layout-tabs">
+      <button
+        v-for="tab in tabOptions"
+        :key="`tab-${tab.value}`"
+        type="button"
+        :class="['layout-tab', { 'layout-tab--active': activeTab === tab.value }]"
+        @click="activeTab = tab.value"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
     <div class="layout" :style="layoutStyle">
+      <p v-if="!visibleContainers.length" class="layout__empty">
+        Нет контейнеров на этой вкладке.
+      </p>
       <article
-        v-for="container in pageContainers"
+        v-for="container in visibleContainers"
         :key="container.id"
         class="layout-card"
         :style="containerStyle(container)"
@@ -559,7 +574,7 @@
                     :key="`${entryIndex}-${field.key}`"
                     :class="{ 'is-number': isNumericField(field) }"
                   >
-                    {{ formatDetailValue(entry[field.key]) }}
+                    {{ formatDetailValue(resolvePivotFieldValue(entry, field.key)) }}
                   </td>
                 </tr>
               </tbody>
@@ -595,6 +610,9 @@ import {
   augmentPivotViewWithFormulas,
   filterPivotViewByVisibility,
   formatValue,
+  resolvePivotFieldValue,
+  parseDatePartKey,
+  formatDatePartFieldLabel,
 } from '@/shared/lib/pivotUtils'
 import {
   applyConditionalFormattingToView,
@@ -608,6 +626,7 @@ import {
   fetchJoinPayload,
   parseJoinConfig,
 } from '@/shared/lib/sourceJoins.js'
+import { defaultLayoutSettings } from '@/shared/lib/layoutMeta'
 import {
   canUserAccessPage,
   isPagePrivate,
@@ -659,10 +678,56 @@ watch(
   },
 )
 
+const layoutSettings = computed(() => {
+  const raw = page.value?.layout?.settings || defaultLayoutSettings()
+  const columns = Math.max(1, Math.min(6, Number(raw.columns) || 1))
+  const tabs = Math.max(1, Math.min(12, Number(raw.tabs) || 1))
+  const rawNames = Array.isArray(raw.tabNames) ? raw.tabNames : []
+  const tabNames = Array.from({ length: tabs }, (_, index) => {
+    const label = rawNames[index]
+    if (typeof label === 'string' && label.trim()) {
+      return label.trim()
+    }
+    return `Вкладка ${index + 1}`
+  })
+  return { columns, tabs, tabNames }
+})
+const activeTab = ref(1)
+const tabOptions = computed(() =>
+  layoutSettings.value.tabNames.map((label, index) => ({
+    value: index + 1,
+    label,
+  })),
+)
+const visibleContainers = computed(() => {
+  if (!pageContainers.value.length) return []
+  if (layoutSettings.value.tabs <= 1) return pageContainers.value
+  const current = Math.min(
+    layoutSettings.value.tabs,
+    Math.max(1, activeTab.value),
+  )
+  return pageContainers.value.filter(
+    (container) => (container.tabIndex || 1) === current,
+  )
+})
+watch(
+  tabOptions,
+  (options) => {
+    const values = options.map((option) => option.value)
+    if (!values.length) {
+      activeTab.value = 1
+      return
+    }
+    if (!values.includes(activeTab.value)) {
+      activeTab.value = values[0]
+    }
+  },
+  { immediate: true },
+)
 const layoutStyle = computed(() => {
-  const preset = store.layoutTemplateMap[page.value?.layout?.preset]
+  const template = `repeat(${layoutSettings.value.columns}, minmax(0, 1fr))`
   return {
-    gridTemplateColumns: pageContainers.value.length ? preset || '1fr' : '1fr',
+    gridTemplateColumns: pageContainers.value.length ? template : '1fr',
   }
 })
 
@@ -710,10 +775,11 @@ const pageFilterOptions = computed(() =>
   commonFilterKeys.value.map((key) => {
     const descriptor = globalFieldMetaMap.value.get(key) || {}
     const hasRange = globalFilterRangeDefaults.value.has(key)
+    const dateMeta = parseDatePartKey(key)
     return {
       key,
-      label: dictionaryLabelValue(key) || humanizeKey(key),
-      type: descriptor.type || '',
+      label: resolveGlobalFilterLabel(key, descriptor),
+      type: descriptor.type || (dateMeta ? 'string' : ''),
       rangeOnly: hasRange,
     }
   }),
@@ -724,6 +790,23 @@ const filterMap = computed(() =>
     return acc
   }, {}),
 )
+
+function resolveGlobalFilterLabel(key, descriptor = {}) {
+  const direct = dictionaryLabelValue(key)
+  if (direct) return direct
+  if (descriptor?.label) return descriptor.label
+  const dateMeta = parseDatePartKey(key)
+  if (dateMeta) {
+    const baseDictionary = dictionaryLabelValue(dateMeta.fieldKey)
+    const baseDescriptor = globalFieldMetaMap.value.get(dateMeta.fieldKey)
+    const baseLabel =
+      baseDictionary ||
+      baseDescriptor?.label ||
+      humanizeKey(dateMeta.fieldKey)
+    return formatDatePartFieldLabel(baseLabel, dateMeta.part)
+  }
+  return humanizeKey(key)
+}
 const activePageFilters = computed(() =>
   (page.value?.filters || [])
     .map((key) => filterMap.value[key])
@@ -1298,7 +1381,8 @@ function buildDimensionPath(record, dimensions = []) {
   if (!Array.isArray(dimensions) || !dimensions.length) return '__all__'
   let prefix = ''
   dimensions.forEach((fieldKey) => {
-    const normalized = `${fieldKey}:${normalizeValue(record[fieldKey])}`
+    const value = resolvePivotFieldValue(record, fieldKey)
+    const normalized = `${fieldKey}:${normalizeValue(value)}`
     prefix = prefix ? `${prefix}|${normalized}` : normalized
   })
   return prefix || '__all__'
@@ -1318,16 +1402,15 @@ function resolveDetailFieldDescriptors(tpl, metric) {
     (explicitFields.length ? explicitFields : defaults).filter(Boolean),
   )
   const fieldMeta = templateFieldMetaMap(tpl)
+  const overrides = tpl.snapshot?.options?.headerOverrides || {}
+  const rawFieldMeta = tpl.snapshot?.fieldMeta || {}
   return Array.from(fieldsSet)
     .filter(Boolean)
     .map((key) => ({
       key,
-      label:
-        tpl.snapshot?.options?.headerOverrides?.[key] ||
-        fieldMeta.get(key)?.label ||
-        humanizeKey(key),
+      label: resolveFieldLabel(key, overrides, rawFieldMeta),
       type:
-        fieldMeta.get(key)?.type ||
+        resolveFieldMetaEntry(fieldMeta, key)?.type ||
         (metric?.fieldKey === key ? 'number' : 'string'),
     }))
 }
@@ -1346,7 +1429,7 @@ function exportDetailRecords() {
   const header = detailDialog.fields.map((field) => field.label || field.key)
   const rows = detailDialog.entries.map((entry) =>
     detailDialog.fields.map((field) =>
-      formatDetailValue(entry?.[field.key]),
+      formatDetailValue(resolvePivotFieldValue(entry, field.key)),
     ),
   )
   const lines = [header, ...rows]
@@ -1679,6 +1762,18 @@ function resolveSourceJoins(source = {}) {
   return normalizeJoinList(parsed)
 }
 
+function resolveFieldMetaEntry(store, key) {
+  if (!store) return null
+  const direct =
+    typeof store.get === 'function' ? store.get(key) : store?.[key]
+  if (direct) return direct
+  const meta = parseDatePartKey(key)
+  if (!meta) return null
+  return typeof store.get === 'function'
+    ? store.get(meta.fieldKey)
+    : store?.[meta.fieldKey]
+}
+
 function matchFieldSet(
   record,
   keys = [],
@@ -1689,15 +1784,16 @@ function matchFieldSet(
   return (keys || []).every((key) => {
     const selected = store?.[key]
     if (selected && selected.length) {
-      const value = normalizeValue(record?.[key])
+      const value = normalizeValue(resolvePivotFieldValue(record, key))
       if (!selected.includes(value)) {
         return false
       }
     }
     const range = rangeStore?.[key]
     if (range && hasActiveRange(range)) {
-      const descriptor = fieldMetaMap.get(key)
-      if (!valueSatisfiesRange(record?.[key], range, descriptor)) {
+      const descriptor = resolveFieldMetaEntry(fieldMetaMap, key)
+      const value = resolvePivotFieldValue(record, key)
+      if (!valueSatisfiesRange(value, range, descriptor)) {
         return false
       }
     }
@@ -1810,14 +1906,20 @@ function matchesGlobalFilters(record) {
   return activePageFilters.value.every((filter) => {
     const values = pageFilterValues[filter.key]
     if (Array.isArray(values) && values.length) {
-      const recordValue = normalizeValue(record?.[filter.key])
+      const recordValue = normalizeValue(
+        resolvePivotFieldValue(record, filter.key),
+      )
       if (!recordValue && recordValue !== '') return false
       if (!values.includes(recordValue)) return false
     }
     const range = pageFilterRanges[filter.key]
     if (range && hasActiveRange(range)) {
-      const descriptor = globalFieldMetaMap.value.get(filter.key)
-      if (!valueSatisfiesRange(record?.[filter.key], range, descriptor)) {
+      const dateMeta = parseDatePartKey(filter.key)
+      const descriptor =
+        globalFieldMetaMap.value.get(filter.key) ||
+        (dateMeta ? globalFieldMetaMap.value.get(dateMeta.fieldKey) : null)
+      const resolvedValue = resolvePivotFieldValue(record, filter.key)
+      if (!valueSatisfiesRange(resolvedValue, range, descriptor)) {
         return false
       }
     }
@@ -1939,9 +2041,14 @@ function metricDisplayLabel(metric = {}) {
   return metric.fieldKey || ''
 }
 
-function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
+function buildChartConfig(
+  view,
+  vizType,
+  rowTotalsAllowed = new Set(),
+  metrics = [],
+) {
   if (!supportedCharts.includes(vizType)) return null
-  const labels = view.rows.map((row) => row.label || '—')
+  const labels = view.rows.map((row, index) => displayRowLabel(row, index))
   let datasets = []
 
   if (view.columns.length) {
@@ -1952,7 +2059,7 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
         return typeof cell?.value === 'number' ? Number(cell.value) : 0
       })
       return {
-        label: column.label,
+        label: displayColumnLabel(column, index),
         data,
         backgroundColor: color,
         borderColor: color,
@@ -1976,7 +2083,7 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
         return typeof total?.value === 'number' ? Number(total.value) : 0
       })
       return {
-        label: header.label,
+        label: header.label || `Метрика ${index + 1}`,
         data,
         backgroundColor: color,
         borderColor: color,
@@ -1988,6 +2095,8 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
   }
 
   if (!datasets.length) return null
+
+  const chartTitle = buildChartTitle(metrics)
 
   if (vizType === 'pie') {
     const pieDataset = datasets[0]
@@ -2010,7 +2119,15 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: { legend: { position: 'bottom' } },
+        plugins: {
+          legend: { position: 'bottom' },
+          title: {
+            display: Boolean(chartTitle),
+            text: chartTitle,
+            align: 'center',
+            padding: { top: 4, bottom: 8 },
+          },
+        },
       },
     }
   }
@@ -2026,6 +2143,12 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
       plugins: {
         legend: { position: 'bottom' },
         tooltip: { mode: 'index', intersect: false },
+        title: {
+          display: Boolean(chartTitle),
+          text: chartTitle,
+          align: 'center',
+          padding: { top: 4, bottom: 8 },
+        },
       },
       scales: {
         x: { ticks: { autoSkip: false } },
@@ -2033,6 +2156,87 @@ function buildChartConfig(view, vizType, rowTotalsAllowed = new Set()) {
       },
     },
   }
+}
+
+function buildChartTitle(metrics = []) {
+  const labels = (metrics || [])
+    .filter((metric) => metric?.enabled !== false)
+    .map((metric) => metric?.label || metric?.title || metric?.fieldLabel)
+    .map((label) => (label ? String(label).trim() : ''))
+    .filter(Boolean)
+  const unique = [...new Set(labels)]
+  return unique.join(', ')
+}
+
+function displayRowLabel(row, index) {
+  if (Array.isArray(row?.values) && row.values.length) {
+    return row.values.filter(Boolean).join(' • ')
+  }
+  if (row?.label) return row.label
+  return `Строка ${index + 1}`
+}
+
+function displayColumnLabel(column, index) {
+  const metricLabel = columnMetricLabel(column)
+  const normalizedMetric = normalizeLabelValue(metricLabel)
+  const values = Array.isArray(column?.values)
+    ? column.values.map((value) => (value == null ? '' : String(value).trim()))
+    : []
+  const categories = values
+    .map((value) => value.trim())
+    .filter((value) => value && (!normalizedMetric || normalizeLabelValue(value) !== normalizedMetric))
+  if (categories.length) {
+    return categories.join(' • ')
+  }
+  const rawLabel = typeof column?.label === 'string' ? column.label : ''
+  const stripped = stripMetricFromLabel(rawLabel, metricLabel)
+  if (stripped) {
+    return stripped
+  }
+  if (metricLabel) {
+    return metricLabel
+  }
+  if (rawLabel) {
+    return rawLabel.trim()
+  }
+  return `Колонка ${index + 1}`
+}
+
+function columnMetricLabel(column = {}) {
+  const sources = [
+    column?.metric?.label,
+    column?.metric?.title,
+    column?.metric?.fieldLabel,
+    column?.metric?.displayLabel,
+  ]
+  for (const candidate of sources) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
+    }
+  }
+  return ''
+}
+
+function normalizeLabelValue(value) {
+  if (!value) return ''
+  return String(value).trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+function stripMetricFromLabel(label, metricLabel) {
+  if (!label) return ''
+  const trimmed = String(label).trim()
+  if (!trimmed) return ''
+  if (!metricLabel) return trimmed
+  const normalizedMetric = normalizeLabelValue(metricLabel)
+  if (!normalizedMetric) return trimmed
+  const tokens = trimmed
+    .split(/[•\-–—,:]/)
+    .map((token) => token.trim())
+    .filter((token) => token && normalizeLabelValue(token) !== normalizedMetric)
+  if (tokens.length) {
+    return tokens.join(' • ')
+  }
+  return ''
 }
 
 async function hydrateContainer(container) {
@@ -2123,6 +2327,7 @@ async function hydrateContainer(container) {
     }
     let baseView
     try {
+      const sortsToApply = tpl.snapshot?.options?.sorts || {}
       baseView = buildPivotView({
         records: filtered,
         rows: tpl.snapshot?.pivot?.rows || [],
@@ -2130,7 +2335,7 @@ async function hydrateContainer(container) {
         metrics: baseMetrics,
         fieldMeta: templateFieldMetaMap(tpl),
         headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
-        sorts: tpl.snapshot?.options?.sorts || {},
+        sorts: sortsToApply,
       })
     } catch (err) {
       if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
@@ -2148,7 +2353,12 @@ async function hydrateContainer(container) {
       return
     }
     state.view = view
-    state.chart = buildChartConfig(view, tpl.visualization, rowTotalsAllowed)
+    state.chart = buildChartConfig(
+      view,
+      tpl.visualization,
+      rowTotalsAllowed,
+      metrics,
+    )
     const headerMeta = buildHeaderMeta(
       tpl,
       metrics.filter((metric) => metric.enabled !== false),
@@ -2479,6 +2689,20 @@ function resolveFieldLabel(key, overrides = {}, fieldMeta = {}) {
   if (override && override.trim()) return override.trim()
   const dictionaryLabel = dictionaryLabelValue(normalizedKey)
   if (dictionaryLabel) return dictionaryLabel
+  const dateMeta = parseDatePartKey(normalizedKey)
+  if (dateMeta) {
+    const baseOverride = overrides?.[dateMeta.fieldKey]
+    if (baseOverride && baseOverride.trim()) {
+      return formatDatePartFieldLabel(baseOverride, dateMeta.part)
+    }
+    const baseDictionary = dictionaryLabelValue(dateMeta.fieldKey)
+    if (baseDictionary) {
+      return formatDatePartFieldLabel(baseDictionary, dateMeta.part)
+    }
+    const baseMeta = fieldMeta?.[dateMeta.fieldKey]
+    const baseLabel = baseMeta?.label || humanizeKey(dateMeta.fieldKey)
+    return formatDatePartFieldLabel(baseLabel, dateMeta.part)
+  }
   const meta = fieldMeta?.[normalizedKey]
   if (meta?.label) return meta.label
   return humanizeKey(normalizedKey)
@@ -2617,7 +2841,7 @@ function collectFilterValuesFromRecords(
   if (!Array.isArray(records) || !records.length) return []
   const unique = new Set()
   for (const record of records) {
-    const normalized = normalizeValue(record?.[key])
+    const normalized = normalizeValue(resolvePivotFieldValue(record, key))
     if (!unique.has(normalized)) {
       unique.add(normalized)
     }
@@ -2932,6 +3156,33 @@ function editPage() {
 .layout {
   display: grid;
   gap: 16px;
+}
+.layout-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.layout-tab {
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  background: #fff;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.layout-tab--active {
+  background: #312e81;
+  color: #fff;
+  border-color: #312e81;
+}
+.layout__empty {
+  margin: 0;
+  padding: 12px;
+  color: #6b7280;
+  font-size: 13px;
+  grid-column: 1 / -1;
 }
 .layout-card {
   border: 1px solid #e5e7eb;

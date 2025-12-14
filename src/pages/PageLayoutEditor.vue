@@ -29,6 +29,9 @@
       <label class="field">
         <span>Описание</span>
         <textarea v-model="draft.description" rows="3" placeholder="Короткое описание страницы"></textarea>
+        <p v-if="descriptionWarningVisible" class="warning-text">
+          Изменение описания перезапишет скрытые настройки макета. Проверьте макет и вкладки после сохранения.
+        </p>
       </label>
 
       <div class="field">
@@ -98,6 +101,26 @@
           </option>
         </select>
       </label>
+      <div class="layout-options">
+        <label>
+          <span>Вкладки</span>
+          <input
+            type="number"
+            min="1"
+            :max="MAX_TABS"
+            v-model.number="draft.layout.settings.tabs"
+          />
+        </label>
+      </div>
+      <div class="tab-names">
+        <label v-for="tab in tabLabelEntries" :key="`tab-name-${tab.value}`">
+          <span>Название вкладки {{ tab.value }}</span>
+          <input
+            v-model="draft.layout.settings.tabNames[tab.value - 1]"
+            :placeholder="tab.placeholder"
+          />
+        </label>
+      </div>
 
       <section class="containers">
         <header>
@@ -163,6 +186,14 @@
                 </option>
               </select>
             </label>
+            <label>
+              <span>Вкладка</span>
+              <select v-model.number="container.tabIndex">
+                <option v-for="option in tabSelectOptions" :key="option.value" :value="option.value">
+                  {{ option.label }}
+                </option>
+              </select>
+            </label>
           </div>
           <p v-if="container.templateId" class="muted">
             {{ templateMeta(container.templateId)?.description || 'Без описания' }}
@@ -189,6 +220,7 @@ import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/s
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
 import { useAuthStore } from '@/shared/stores/auth'
 import { humanizeKey } from '@/shared/lib/pivotUtils'
+import { defaultLayoutSettings } from '@/shared/lib/layoutMeta'
 import { canUserAccessPage, readStoredUserMeta, resolveUserMeta } from '@/shared/lib/pageAccess'
 import { NRadioGroup, NRadioButton, NSelect } from 'naive-ui'
 
@@ -204,6 +236,8 @@ const loading = ref(true)
 const loadError = ref('')
 const saving = ref(false)
 const deletedContainerIds = ref([])
+const originalDescription = ref('')
+const descriptionMetaFlags = ref({ hasSettingsMarker: false, hasContainerMarker: false })
 
 const draft = reactive({
   id: null,
@@ -220,6 +254,8 @@ const draft = reactive({
   layout: {
     preset: '',
     containers: [],
+    settings: defaultLayoutSettings(),
+    containerTabs: {},
   },
 })
 
@@ -252,6 +288,40 @@ const globalFilterSelectOptions = computed(() =>
     value: filter.key,
     label: filter.label,
   })),
+)
+const layoutSettings = computed(() => {
+  if (!draft.layout.settings) {
+    draft.layout.settings = defaultLayoutSettings()
+  }
+  if (!Array.isArray(draft.layout.settings.tabNames)) {
+    draft.layout.settings.tabNames = [...defaultLayoutSettings().tabNames]
+  }
+  return draft.layout.settings
+})
+const tabLabelEntries = computed(() => {
+  const count = Number(layoutSettings.value.tabs) || 1
+  const names = Array.isArray(layoutSettings.value.tabNames) ? layoutSettings.value.tabNames : []
+  return Array.from({ length: Math.max(1, count) }, (_, index) => {
+    const fallback = `Вкладка ${index + 1}`
+    const stored = typeof names[index] === 'string' ? names[index].trim() : ''
+    return {
+      value: index + 1,
+      label: stored || fallback,
+      placeholder: fallback,
+    }
+  })
+})
+const tabSelectOptions = computed(() =>
+  tabLabelEntries.value.map((entry) => ({
+    value: entry.value,
+    label: entry.label,
+  })),
+)
+const descriptionHasHiddenMeta = computed(
+  () => descriptionMetaFlags.value.hasSettingsMarker || descriptionMetaFlags.value.hasContainerMarker,
+)
+const descriptionWarningVisible = computed(
+  () => descriptionHasHiddenMeta.value && draft.description !== originalDescription.value,
 )
 const selectedPrivacyOption = computed(() =>
   privacyOptions.value.find((option) => option.fv === draft.fvPrivate) || null,
@@ -308,11 +378,114 @@ const currentUserMeta = computed(() => {
   return readStoredUserMeta()
 })
 
+const MAX_COLUMNS = 6
+const MAX_TABS = 12
+
+function clampColumns(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 1
+  return Math.min(MAX_COLUMNS, Math.max(1, Math.trunc(numeric)))
+}
+
+function clampTabs(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 1
+  return Math.min(MAX_TABS, Math.max(1, Math.trunc(numeric)))
+}
+
+function ensureLayoutSettings() {
+  if (!draft.layout.settings) {
+    draft.layout.settings = defaultLayoutSettings()
+  }
+  if (!Array.isArray(draft.layout.settings.tabNames)) {
+    draft.layout.settings.tabNames = [...defaultLayoutSettings().tabNames]
+  }
+}
+
+function syncTabNames(tabCount) {
+  ensureLayoutSettings()
+  const normalizedCount = clampTabs(tabCount)
+  const current = Array.isArray(draft.layout.settings.tabNames)
+    ? [...draft.layout.settings.tabNames]
+    : []
+  if (current.length > normalizedCount) {
+    draft.layout.settings.tabNames = current.slice(0, normalizedCount)
+    return
+  }
+  if (current.length < normalizedCount) {
+    const next = [...current]
+    for (let i = current.length; i < normalizedCount; i += 1) {
+      next.push(`Вкладка ${i + 1}`)
+    }
+    draft.layout.settings.tabNames = next
+    return
+  }
+  draft.layout.settings.tabNames = current
+}
+
+function deriveColumnsFromPreset(presetValue) {
+  if (!presetValue) return null
+  const preset = layoutOptions.value.find((option) => option.value === presetValue)
+  if (!preset) return null
+  const template = preset.template || ''
+  const tokens = template
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean)
+  return clampColumns(tokens.length || 1)
+}
+
 watch(layoutOptions, (options) => {
   if (!draft.layout.preset && options.length) {
     draft.layout.preset = options[0].value
   }
 })
+
+watch(
+  () => draft.layout.settings?.columns,
+  (next) => {
+    ensureLayoutSettings()
+    const normalized = clampColumns(next)
+    if (draft.layout.settings.columns !== normalized) {
+      draft.layout.settings.columns = normalized
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => draft.layout.settings?.tabs,
+  (next) => {
+    ensureLayoutSettings()
+    const normalized = clampTabs(next)
+    if (draft.layout.settings.tabs !== normalized) {
+      draft.layout.settings.tabs = normalized
+    }
+    syncTabNames(normalized)
+    draft.layout.containers.forEach((container) => {
+      if (!Number.isFinite(Number(container.tabIndex)) || container.tabIndex < 1) {
+        container.tabIndex = 1
+      } else if (container.tabIndex > normalized) {
+        container.tabIndex = normalized
+      }
+    })
+  },
+  { immediate: true },
+)
+
+watch(
+  [() => draft.layout.preset, layoutOptions],
+  ([preset]) => {
+    if (!preset) return
+    const derived = deriveColumnsFromPreset(preset)
+    if (!derived) return
+    ensureLayoutSettings()
+    if (draft.layout.settings.columns !== derived) {
+      draft.layout.settings.columns = derived
+    }
+  },
+  { immediate: true },
+)
 
 watch(widthOptions, (options) => {
   if (!options.length) return
@@ -387,6 +560,10 @@ onMounted(async () => {
     } else if (!draft.layout.preset && layoutOptions.value.length) {
       draft.layout.preset = layoutOptions.value[0].value
     }
+    if (isNew.value) {
+      originalDescription.value = draft.description
+      descriptionMetaFlags.value = { hasSettingsMarker: false, hasContainerMarker: false }
+    }
   } catch (err) {
     console.warn('Failed to initialize page editor', err)
     loadError.value = 'Не удалось загрузить страницу. Попробуйте позже.'
@@ -412,6 +589,8 @@ async function loadExistingPage() {
   draft.menuTitle = existing.menuTitle || ''
   draft.pageTitle = existing.pageTitle || ''
   draft.description = existing.description || ''
+  originalDescription.value = draft.description
+  descriptionMetaFlags.value = existing.layout?.metaFlags || { hasSettingsMarker: false, hasContainerMarker: false }
   draft.filters = [...(existing.filters || [])]
   draft.fvPrivate = existing.privacy?.fv ?? null
   draft.pvPrivate = existing.privacy?.pv ?? null
@@ -420,6 +599,11 @@ async function loadExistingPage() {
     ? existing.privacy.users.map((user) => ({ ...user }))
     : []
   draft.layout.preset = existing.layout?.preset || layoutOptions.value[0]?.value || ''
+  draft.layout.settings = existing.layout?.settings
+    ? { ...existing.layout.settings }
+    : defaultLayoutSettings()
+  draft.layout.containerTabs = { ...(existing.layout?.containerTabs || {}) }
+  syncTabNames(draft.layout.settings?.tabs || 1)
   const containers = await store.fetchPageContainers(existing.id, true)
   draft.layout.containers.splice(0, draft.layout.containers.length)
   containers.forEach((container, index) => {
@@ -431,6 +615,7 @@ async function loadExistingPage() {
       templateId: container.templateId || '',
       widthOption: container.widthOption || widthOptions.value[0]?.value || '',
       heightOption: container.heightOption || heightOptions.value[0]?.value || '',
+      tabIndex: container.tabIndex || 1,
       order: container.order ?? index + 1,
     })
   })
@@ -443,6 +628,12 @@ function ensureContainerDefaults() {
   draft.layout.containers.forEach((container) => {
     if (!container.widthOption) container.widthOption = widthFallback
     if (!container.heightOption) container.heightOption = heightFallback
+    if (!Number.isFinite(Number(container.tabIndex)) || container.tabIndex < 1) {
+      container.tabIndex = 1
+    }
+    if (container.tabIndex > clampTabs(draft.layout.settings?.tabs || 1)) {
+      container.tabIndex = clampTabs(draft.layout.settings?.tabs || 1)
+    }
   })
 }
 
@@ -478,6 +669,7 @@ function addContainer() {
     templateId: templates.value[0]?.id || '',
     widthOption: widthOptions.value[0]?.value || '',
     heightOption: heightOptions.value[0]?.value || '',
+    tabIndex: 1,
     order: draft.layout.containers.length + 1,
   })
 }
@@ -569,6 +761,40 @@ function goBack() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.layout-options {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.layout-options label {
+  flex: 1 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.layout-options input {
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.tab-names {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.tab-names label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tab-names input {
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 14px;
 }
 .filter-grid {
   display: flex;

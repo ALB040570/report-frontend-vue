@@ -9,6 +9,14 @@ import {
 } from '@/shared/api/report'
 import { fetchReportViewTemplates } from '@/shared/services/reportViews'
 import { canUserAccessPage } from '@/shared/lib/pageAccess'
+import {
+  extractLayoutMeta,
+  injectLayoutMeta,
+  parseContainerTitle,
+  formatContainerTitle,
+  defaultLayoutSettings,
+  sanitizeContainerTabMap,
+} from '@/shared/lib/layoutMeta'
 
 const LAYOUT_FACTOR_CODE = 'Prop_Layout'
 const WIDTH_FACTOR_CODE = 'Prop_Width'
@@ -229,6 +237,7 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
             this.templates,
             this.widthOptions,
             this.heightOptions,
+            page.layout?.containerTabs || {},
           )
           containersMap.set(page.id, containers)
           return page
@@ -284,59 +293,18 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
       const operation = resolvedRawId ? 'upd' : 'ins'
       const now = new Date().toISOString().slice(0, 10)
       const normalizedDescription = draft.description?.trim() || ''
-      const payload = {
-        name: draft.pageTitle?.trim() || draft.menuTitle?.trim() || 'Страница',
-        MenuItem: draft.menuTitle?.trim() || '',
-        PageTitle: draft.pageTitle?.trim() || '',
-        Description: normalizedDescription,
-        GlobalFilter: formatFilterString(draft.filters || []),
-        fvLayout: layoutMeta.fv,
-        pvLayout: layoutMeta.pv,
-        CreatedAt: remoteMeta.CreatedAt || now,
-        UpdatedAt: now,
-        objUser: userMeta.objUser,
-        pvUser: userMeta.pvUser,
-      }
-      payload.objUserMulti = []
-      const privacyMeta = normalizeDraftPrivacy(draft, this.privacyOptions)
-      if (privacyMeta) {
-        payload.fvPrivate = privacyMeta.fv
-        payload.pvPrivate = privacyMeta.pv
-        payload.objUserMulti = privacyMeta.users
-        if (privacyMeta.id) {
-          payload.idPrivate = privacyMeta.id
-        }
-      }
+      const initialContainerTabs = buildContainerTabMap(draft.layout?.containers || [])
+      const payload = createBasePagePayload(
+        draft,
+        layoutMeta,
+        normalizedDescription,
+        initialContainerTabs,
+        now,
+        userMeta,
+      )
+      applyPrivacyPayload(payload, draft, this.privacyOptions)
       if (operation === 'upd') {
-        if (!resolvedRawId) {
-          throw new Error('Не удалось определить идентификатор страницы.')
-        }
-        const updateId = resolvedNumericId ?? readMetaNumber(remoteMeta, 'id', 'Id', 'ID')
-        if (!updateId) {
-          throw new Error('Не удалось определить идентификатор страницы.')
-        }
-        const clsValue = readMetaNumber(remoteMeta, 'cls', 'Cls', 'CLS')
-        const idMenuItem = readMetaNumber(remoteMeta, 'idMenuItem', 'IdMenuItem', 'IDMenuItem')
-        const idPageTitle = readMetaNumber(remoteMeta, 'idPageTitle', 'IdPageTitle', 'IDPageTitle')
-        const idLayout = readMetaNumber(remoteMeta, 'idLayout', 'IdLayout', 'IDLayout')
-        if (!clsValue || !idMenuItem || !idPageTitle || !idLayout) {
-          throw new Error('Страница загружена не полностью. Обновите список страниц и попробуйте снова.')
-        }
-        payload.id = updateId
-        payload.cls = clsValue
-        payload.idMenuItem = idMenuItem
-        payload.idPageTitle = idPageTitle
-        payload.idLayout = idLayout
-        const idDescription = readMetaNumber(remoteMeta, 'idDescription', 'IdDescription', 'IDDescription')
-        if (idDescription) payload.idDescription = idDescription
-        const idGlobalFilter = readMetaNumber(remoteMeta, 'idGlobalFilter', 'IdGlobalFilter', 'IDGlobalFilter')
-        if (idGlobalFilter) payload.idGlobalFilter = idGlobalFilter
-        const idUpdatedAt = readMetaNumber(remoteMeta, 'idUpdatedAt', 'IdUpdatedAt', 'IDUpdatedAt')
-        const idUser = readMetaNumber(remoteMeta, 'idUser', 'IdUser', 'IDUser')
-        const idCreatedAt = readMetaNumber(remoteMeta, 'idCreatedAt', 'IdCreatedAt', 'IDCreatedAt')
-        if (idCreatedAt) payload.idCreatedAt = idCreatedAt
-        if (idUpdatedAt) payload.idUpdatedAt = idUpdatedAt
-        if (idUser) payload.idUser = idUser
+        applyUpdateIdentifiers(payload, draft)
       }
       const saved = await saveReportPage(operation, payload)
       let remoteId = toStableId(saved?.id ?? saved?.Id ?? saved?.ID ?? payload.id ?? resolvedRawId)
@@ -355,8 +323,33 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
       const autoDeleteIds = collectRemovedContainerIds(existingContainers, draft.layout?.containers || [])
       await this.deleteContainers([...autoDeleteIds, ...deletedContainerIds])
       await this.saveContainers(remoteId, draft.layout?.containers || [])
+      const finalContainerTabs = buildContainerTabMap(draft.layout?.containers || [])
+      if (!areTabMapsEqual(initialContainerTabs, finalContainerTabs)) {
+        draft.remoteId = remoteId
+        await this.updatePageLayoutMeta(draft, layoutMeta, normalizedDescription, finalContainerTabs, userMeta)
+        draft.layout.containerTabs = { ...finalContainerTabs }
+      }
       await this.fetchPages(true)
       return remoteId
+    },
+    async updatePageLayoutMeta(draft, layoutMeta, normalizedDescription, containerTabMap, userMeta) {
+      const remoteId = toStableId(draft.remoteId || draft.id)
+      if (!remoteId) return
+      await this.ensureDraftRemoteMeta(draft, remoteId)
+      const now = new Date().toISOString().slice(0, 10)
+      const payload = createBasePagePayload(draft, layoutMeta, normalizedDescription, containerTabMap, now, userMeta)
+      applyPrivacyPayload(payload, draft, this.privacyOptions)
+      applyUpdateIdentifiers(payload, draft)
+      await saveReportPage('upd', payload)
+    },
+    async ensureDraftRemoteMeta(draft, remoteId) {
+      if (hasRequiredPageMeta(draft.remoteMeta)) return
+      await this.fetchPages(true)
+      const target = this.pages.find((page) => page.remoteId === remoteId || page.id === remoteId)
+      if (!target) {
+        throw new Error('Не удалось найти страницу для обновления макета. Обновите список страниц и попробуйте снова.')
+      }
+      draft.remoteMeta = target.remoteMeta || target || {}
     },
     async saveContainers(pageId, containers = []) {
       if (!containers.length) return
@@ -395,7 +388,7 @@ export const usePageBuilderStore = defineStore('pageBuilder', {
           this.heightOptions[0] ||
           null
         const payload = {
-          Title: container.title?.trim() || 'Контейнер',
+          Title: formatContainerTitle(container.title, container.tabIndex),
           order: container.order || 1,
           objLinkToView,
           pvLinkToView,
@@ -468,12 +461,16 @@ function normalizePageRecord(entry = {}, index = 0, layoutOptions = [], privacyO
   const remoteId = toStableId(entry?.id ?? entry?.Id ?? entry?.ID)
   const layoutMeta = findLayoutByCodes(layoutOptions, entry?.fvLayout, entry?.pvLayout)
   const privacy = normalizePrivacyRecord(entry, privacyOptions)
+  const rawDescription = entry?.Description || entry?.Discription || entry?.description || ''
+  const { text: descriptionText, settings: layoutSettings, containerTabs, metaFlags } = extractLayoutMeta(
+    rawDescription || '',
+  )
   return {
     id: remoteId || `page-${index}`,
     remoteId,
     menuTitle: entry?.MenuItem || entry?.menuTitle || entry?.Menu || '',
     pageTitle: entry?.PageTitle || entry?.name || '',
-    description: entry?.Description || entry?.Discription || entry?.description || '',
+    description: descriptionText,
     filters: parseFilterList(entry?.GlobalFilter),
     containerCount: Number(entry?.ContainerCount || entry?.containerCount || 0),
     layout: {
@@ -481,6 +478,9 @@ function normalizePageRecord(entry = {}, index = 0, layoutOptions = [], privacyO
       template: layoutMeta?.template || '1fr',
       fvLayout: layoutMeta?.fv || toNumericId(entry?.fvLayout),
       pvLayout: layoutMeta?.pv || toNumericId(entry?.pvLayout),
+      settings: layoutSettings,
+      containerTabs,
+      metaFlags,
       containers: [],
     },
     privacy,
@@ -557,10 +557,13 @@ function normalizeContainerRecord(entry = {}, index = 0, templates = [], widthOp
   const templateId = findTemplateIdByLink(templates, entry?.objLinkToView)
   const widthMeta = findOptionByCodes(widthOptions, entry?.fvWidth, entry?.pvWidth)
   const heightMeta = findOptionByCodes(heightOptions, entry?.fvHeight, entry?.pvHeight)
+  const rawTitle = entry?.Title || entry?.name || `Контейнер ${index + 1}`
+  const parsedTitle = parseContainerTitle(rawTitle)
   return {
     id: toStableId(entry?.id ?? entry?.Id) || `container-${index}`,
     remoteId: toStableId(entry?.id ?? entry?.Id),
-    title: entry?.Title || entry?.name || `Контейнер ${index + 1}`,
+    title: parsedTitle.title || rawTitle,
+    tabIndex: parsedTitle.tabIndex || 1,
     templateId,
     widthOption: widthMeta?.value || '',
     heightOption: heightMeta?.value || '',
@@ -571,12 +574,20 @@ function normalizeContainerRecord(entry = {}, index = 0, templates = [], widthOp
   }
 }
 
-function normalizeComplexContainers(records = [], templates = [], widthOptions = [], heightOptions = []) {
-  return (records || []).map((entry, index) =>
-    normalizeContainerRecord(
+function normalizeComplexContainers(
+  records = [],
+  templates = [],
+  widthOptions = [],
+  heightOptions = [],
+  containerTabMap = {},
+) {
+  const tabAssignments = sanitizeContainerTabMap(containerTabMap)
+  return (records || []).map((entry, index) => {
+    const normalized = normalizeContainerRecord(
       {
         id: entry?.idPageContainerComplex,
-        Title: entry?.nameLinkToView || entry?.name || `Контейнер ${index + 1}`,
+        Title: entry?.Title || entry?.nameLinkToView || entry?.name || `Контейнер ${index + 1}`,
+        name: entry?.nameLinkToView || entry?.name || '',
         objLinkToView: entry?.objLinkToView,
         fvWidth: entry?.fvWidth,
         pvWidth: entry?.pvWidth,
@@ -590,8 +601,15 @@ function normalizeComplexContainers(records = [], templates = [], widthOptions =
       templates,
       widthOptions,
       heightOptions,
-    ),
-  )
+    )
+    const remoteKey =
+      toStableId(entry?.idPageContainerComplex ?? entry?.id ?? entry?.Id) || normalized.remoteId || normalized.id
+    const assignedTab = remoteKey ? tabAssignments[remoteKey] : null
+    if (assignedTab) {
+      normalized.tabIndex = assignedTab
+    }
+    return normalized
+  })
 }
 
 function normalizeAccessUsers(records = []) {
@@ -689,6 +707,88 @@ function collectRemovedContainerIds(existingContainers = [], incomingContainers 
   return [...existingIds].filter((id) => !incomingIds.has(id))
 }
 
+function createBasePagePayload(draft, layoutMeta, normalizedDescription, containerTabMap, now, userMeta) {
+  return {
+    name: draft.pageTitle?.trim() || draft.menuTitle?.trim() || 'Страница',
+    MenuItem: draft.menuTitle?.trim() || '',
+    PageTitle: draft.pageTitle?.trim() || '',
+    Description: injectLayoutMeta(
+      normalizedDescription,
+      draft.layout?.settings || defaultLayoutSettings(),
+      containerTabMap,
+    ),
+    GlobalFilter: formatFilterString(draft.filters || []),
+    fvLayout: layoutMeta.fv,
+    pvLayout: layoutMeta.pv,
+    CreatedAt: draft.remoteMeta?.CreatedAt || now,
+    UpdatedAt: now,
+    objUser: userMeta.objUser,
+    pvUser: userMeta.pvUser,
+  }
+}
+
+function applyPrivacyPayload(payload, draft, privacyOptions = []) {
+  payload.objUserMulti = []
+  const privacyMeta = normalizeDraftPrivacy(draft, privacyOptions)
+  if (privacyMeta) {
+    payload.fvPrivate = privacyMeta.fv
+    payload.pvPrivate = privacyMeta.pv
+    payload.objUserMulti = privacyMeta.users
+    if (privacyMeta.id) {
+      payload.idPrivate = privacyMeta.id
+    }
+  }
+}
+
+function applyUpdateIdentifiers(payload, draft) {
+  const remoteMeta = draft.remoteMeta || {}
+  const updateId = toNumericId(draft.remoteId) || toNumericId(draft.id) || readMetaNumber(remoteMeta, 'id', 'Id', 'ID')
+  if (!updateId) {
+    throw new Error('Не удалось определить идентификатор страницы.')
+  }
+  const clsValue = readMetaNumber(remoteMeta, 'cls', 'Cls', 'CLS')
+  const idMenuItem = readMetaNumber(remoteMeta, 'idMenuItem', 'IdMenuItem', 'IDMenuItem')
+  const idPageTitle = readMetaNumber(remoteMeta, 'idPageTitle', 'IdPageTitle', 'IDPageTitle')
+  const idLayout = readMetaNumber(remoteMeta, 'idLayout', 'IdLayout', 'IDLayout')
+  if (!clsValue || !idMenuItem || !idPageTitle || !idLayout) {
+    throw new Error('Страница загружена не полностью. Обновите список страниц и попробуйте снова.')
+  }
+  payload.id = updateId
+  payload.cls = clsValue
+  payload.idMenuItem = idMenuItem
+  payload.idPageTitle = idPageTitle
+  payload.idLayout = idLayout
+  const idDescription = readMetaNumber(remoteMeta, 'idDescription', 'IdDescription', 'IDDescription')
+  if (idDescription) payload.idDescription = idDescription
+  const idGlobalFilter = readMetaNumber(remoteMeta, 'idGlobalFilter', 'IdGlobalFilter', 'IDGlobalFilter')
+  if (idGlobalFilter) payload.idGlobalFilter = idGlobalFilter
+  const idUpdatedAt = readMetaNumber(remoteMeta, 'idUpdatedAt', 'IdUpdatedAt', 'IDUpdatedAt')
+  const idUser = readMetaNumber(remoteMeta, 'idUser', 'IdUser', 'IDUser')
+  const idCreatedAt = readMetaNumber(remoteMeta, 'idCreatedAt', 'IdCreatedAt', 'IDCreatedAt')
+  if (idCreatedAt) payload.idCreatedAt = idCreatedAt
+  if (idUpdatedAt) payload.idUpdatedAt = idUpdatedAt
+  if (idUser) payload.idUser = idUser
+}
+
+function buildContainerTabMap(containers = []) {
+  const map = {}
+  ;(containers || []).forEach((container) => {
+    const remoteId = getContainerRemoteId(container)
+    if (!remoteId) return
+    const numeric = Number(container?.tabIndex)
+    const tabIndex = Number.isFinite(numeric) ? Math.max(1, Math.min(12, Math.trunc(numeric))) : 1
+    map[String(remoteId)] = tabIndex
+  })
+  return sanitizeContainerTabMap(map)
+}
+
+function areTabMapsEqual(a = {}, b = {}) {
+  const keysA = Object.keys(a || {})
+  const keysB = Object.keys(b || {})
+  if (keysA.length !== keysB.length) return false
+  return keysA.every((key) => Number(a[key]) === Number(b[key]))
+}
+
 function findLayoutByCodes(options = [], fv, pv) {
   const numericFv = toNumericId(fv)
   const numericPv = toNumericId(pv)
@@ -719,6 +819,15 @@ function getContainerRemoteId(container = {}) {
     toNumericId(container?.remoteId) ||
     null
   )
+}
+
+function hasRequiredPageMeta(meta = {}) {
+  if (!meta) return false
+  const clsValue = readMetaNumber(meta, 'cls', 'Cls', 'CLS')
+  const idMenuItem = readMetaNumber(meta, 'idMenuItem', 'IdMenuItem', 'IDMenuItem')
+  const idPageTitle = readMetaNumber(meta, 'idPageTitle', 'IdPageTitle', 'IDPageTitle')
+  const idLayout = readMetaNumber(meta, 'idLayout', 'IdLayout', 'IDLayout')
+  return Boolean(clsValue && idMenuItem && idPageTitle && idLayout)
 }
 
 function parseFilterList(raw) {
