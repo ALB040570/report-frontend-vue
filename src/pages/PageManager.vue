@@ -82,7 +82,11 @@ import { useRouter } from 'vue-router'
 import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
 import { useAuthStore } from '@/shared/stores/auth'
-import { humanizeKey } from '@/shared/lib/pivotUtils'
+import {
+  humanizeKey,
+  parseDatePartKey,
+  formatDatePartFieldLabel,
+} from '@/shared/lib/pivotUtils'
 import { canUserAccessPage, readStoredUserMeta, resolveUserMeta } from '@/shared/lib/pageAccess'
 
 const router = useRouter()
@@ -127,11 +131,21 @@ function resolveFieldLabel(key) {
   if (!key) return ''
   const normalized = String(key).trim()
   if (!normalized) return ''
-  const direct = dictionaryLabels.value?.[normalized]
+  const dictionary = dictionaryLabels.value || {}
+  const direct = dictionary[normalized]
   if (direct) return direct
+  const lowerDict = dictionaryLabelsLower.value || {}
   const lower = normalized.toLowerCase()
-  const lowerMatch = dictionaryLabelsLower.value?.[lower]
-  if (lowerMatch) return lowerMatch
+  if (lowerDict[lower]) return lowerDict[lower]
+  const dateMeta = parseDatePartKey(normalized)
+  if (dateMeta) {
+    const baseLower = dateMeta.fieldKey ? dateMeta.fieldKey.toLowerCase() : ''
+    const baseLabel =
+      dictionary[dateMeta.fieldKey] ||
+      (baseLower ? lowerDict[baseLower] : '') ||
+      humanizeKey(dateMeta.fieldKey || '')
+    return formatDatePartFieldLabel(baseLabel, dateMeta.part)
+  }
   return humanizeKey(normalized)
 }
 

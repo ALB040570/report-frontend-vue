@@ -34,32 +34,34 @@
 
     <div v-if="activePageFilters.length" class="page-filters">
       <div class="page-filters__fields">
-        <label
+        <div
           v-for="filter in activePageFilters"
           :key="filter.key"
           class="page-filter"
         >
-          <span>{{ filter.label }}</span>
+          <span class="page-filter__label">{{ filter.label }}</span>
           <FilterRangeControl
             :model-value="pageFilterValues[filter.key]"
             :range="pageFilterRanges[filter.key]"
             :options="globalFilterValueOptions(filter.key)"
-            :supports-range="filterSupportsRange(filter)"
+            :supports-range="
+              filterSupportsRange(filter) && !isValuesOnlyFilter(filter)
+            "
             :range-type="filter.type === 'date' ? 'date' : 'number'"
             placeholder="Выберите значения"
-            :show-mode-toggle="!isGlobalRangeFilter(filter)"
+            :show-mode-toggle="!hasForcedFilterMode(filter)"
             :lock-range="isGlobalRangeFilter(filter)"
             :show-range-hint="!isGlobalRangeFilter(filter)"
             @update:model-value="
               handlePageFilterValuesChange(
                 filter.key,
                 $event,
-                isGlobalRangeFilter(filter),
+                filter.preferredMode,
               )
             "
             @update:range="handlePageFilterRangeChange(filter.key, $event)"
           />
-        </label>
+        </div>
       </div>
       <div class="page-filters__actions">
         <button
@@ -141,10 +143,12 @@
                 :model-value="containerFilterValues[container.id][filter.key]"
                 :range="containerFilterRanges[container.id]?.[filter.key]"
                 :options="fieldOptions(filter)"
-                :supports-range="filterSupportsRange(filter)"
+                :supports-range="
+                  filterSupportsRange(filter) && !isValuesOnlyFilter(filter)
+                "
                 :range-type="filter.type === 'date' ? 'date' : 'number'"
                 placeholder="Выберите значения"
-                :show-mode-toggle="!isContainerRangeFilter(filter)"
+                :show-mode-toggle="!hasForcedFilterMode(filter)"
                 :lock-range="isContainerRangeFilter(filter)"
                 :show-range-hint="!isContainerRangeFilter(filter)"
                 @update:model-value="
@@ -775,12 +779,17 @@ const pageFilterOptions = computed(() =>
   commonFilterKeys.value.map((key) => {
     const descriptor = globalFieldMetaMap.value.get(key) || {}
     const hasRange = globalFilterRangeDefaults.value.has(key)
+    const modePreference = normalizePreferredMode(
+      globalFilterModeMap.value.get(key),
+    )
+    const preferredMode = modePreference || (hasRange ? 'range' : '')
     const dateMeta = parseDatePartKey(key)
     return {
       key,
       label: resolveGlobalFilterLabel(key, descriptor),
       type: descriptor.type || (dateMeta ? 'string' : ''),
-      rangeOnly: hasRange,
+      rangeOnly: preferredMode === 'range',
+      preferredMode,
     }
   }),
 )
@@ -824,6 +833,7 @@ const activePageFilterKeySet = computed(
 )
 const globalFilterValueMap = computed(() => buildGlobalFilterValueMap())
 const globalFilterRangeDefaults = computed(() => buildGlobalFilterRangeMap())
+const globalFilterModeMap = computed(() => buildGlobalFilterModeMap())
 const currentUserMeta = computed(() => {
   const personal = resolveUserMeta(authStore.personalInfo)
   if (personal) return personal
@@ -885,6 +895,7 @@ if (!containerStates[id]) {
       rowHeaderTitle: 'Строки',
     },
     records: [],
+    rawRecords: [],
   }
 }
   return containerStates[id]
@@ -980,10 +991,13 @@ function templateFilters(container) {
   const rangeStore = tpl.snapshot?.filterRanges || {}
   const filtersMeta = (tpl.snapshot?.filtersMeta || []).map((meta) => {
     const range = sanitizeRange(rangeStore?.[meta.key])
+    const preferredMode =
+      normalizePreferredMode(meta?.mode) || (range ? 'range' : '')
     return {
       ...meta,
       type: fieldMeta?.[meta.key]?.type || '',
-      rangeOnly: Boolean(range),
+      rangeOnly: preferredMode === 'range',
+      preferredMode,
     }
   })
   const excluded = activePageFilterKeySet.value
@@ -1901,9 +1915,10 @@ function valueSatisfiesRange(rawValue, range, descriptor = null) {
   return true
 }
 
-function matchesGlobalFilters(record) {
+function matchesGlobalFilters(record, skipKey = null) {
   if (!activePageFilters.value.length) return true
   return activePageFilters.value.every((filter) => {
+    if (filter.key === skipKey) return true
     const values = pageFilterValues[filter.key]
     if (Array.isArray(values) && values.length) {
       const recordValue = normalizeValue(
@@ -2290,6 +2305,7 @@ async function hydrateContainer(container) {
 
   try {
     const records = await ensureTemplateData(tpl)
+    state.rawRecords = Array.isArray(records) ? records : []
     const filtered = filterRecords(
       records,
       tpl.snapshot,
@@ -2672,6 +2688,9 @@ function buildFilterMetaFromRecords(tpl, records = []) {
   if (!filters.length) return []
   const overrides = snapshot?.options?.headerOverrides || {}
   const fieldMeta = snapshot?.fieldMeta || {}
+  const previousMeta = new Map(
+    (snapshot?.filtersMeta || []).map((meta) => [meta?.key, meta || {}]),
+  )
   return filters.map((key) => ({
     key,
     label: resolveFieldLabel(key, overrides, fieldMeta),
@@ -2680,6 +2699,7 @@ function buildFilterMetaFromRecords(tpl, records = []) {
       key,
       FILTER_META_VALUE_LIMIT,
     ),
+    mode: normalizePreferredMode(previousMeta.get(key)?.mode),
   }))
 }
 
@@ -2723,16 +2743,76 @@ function filterSupportsRange(filter = {}) {
   return type === 'number' || type === 'date'
 }
 
+function normalizePreferredMode(value) {
+  if (value === 'range' || value === 'values') return value
+  return ''
+}
+
 function isGlobalRangeFilter(filter) {
+  if (!filter) return false
+  if (filter.preferredMode === 'range') return true
   return Boolean(filter?.rangeOnly)
 }
 
 function isContainerRangeFilter(filter) {
+  if (!filter) return false
+  if (filter.preferredMode === 'range') return true
   return Boolean(filter?.rangeOnly)
 }
 
+function isValuesOnlyFilter(filter) {
+  return filter?.preferredMode === 'values'
+}
+
+function hasForcedFilterMode(filter) {
+  return Boolean(filter?.preferredMode)
+}
+
 function globalFilterValueOptions(key) {
+  const dynamic = computeFilteredGlobalOptions(key)
+  if (dynamic.length) return dynamic
   return globalFilterValueMap.value.get(key) || []
+}
+
+function hasActiveGlobalSelection(filterKey) {
+  const values = pageFilterValues[filterKey]
+  if (Array.isArray(values) && values.length) return true
+  const range = pageFilterRanges[filterKey]
+  if (range && hasActiveRange(range)) return true
+  return false
+}
+
+function computeFilteredGlobalOptions(targetKey) {
+  if (!targetKey) return []
+  const hasOtherActive = activePageFilters.value.some(
+    (filter) => filter.key !== targetKey && hasActiveGlobalSelection(filter.key),
+  )
+  if (!hasOtherActive) return []
+  const containers = pageContainers.value || []
+  if (!containers.length) return []
+  const values = new Map()
+  containers.forEach((container) => {
+    const state = containerState(container.id)
+    const records = state.rawRecords || []
+    if (!records.length) return
+    records.forEach((record) => {
+      if (!matchesGlobalFilters(record, targetKey)) return
+      const resolvedValue = resolvePivotFieldValue(record, targetKey)
+      const normalized = normalizeValue(resolvedValue)
+      if (!values.has(normalized)) {
+        const display = formatValue(resolvedValue)
+        values.set(
+          normalized,
+          display && display !== '—' ? display : normalized || 'пусто',
+        )
+      }
+    })
+  })
+  if (!values.size) return []
+  return Array.from(values.entries()).map(([value, label]) => ({
+    value,
+    label,
+  }))
 }
 
 function buildGlobalFilterValueMap() {
@@ -2783,6 +2863,34 @@ function buildGlobalFilterRangeMap() {
     mergeRangeMap(ranges, tpl.snapshot?.dimensionRanges?.columns || {})
   })
   return ranges
+}
+
+function buildGlobalFilterModeMap() {
+  const containers = pageContainers.value || []
+  const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
+  const modeBuckets = new Map()
+  containers.forEach((container) => {
+    const tpl = templateMap.get(container.templateId)
+    if (!tpl) return
+    ;(tpl.snapshot?.filtersMeta || []).forEach((meta) => {
+      if (!meta?.key) return
+      const normalized = normalizePreferredMode(meta.mode)
+      if (!normalized) return
+      if (!modeBuckets.has(meta.key)) {
+        modeBuckets.set(meta.key, new Set([normalized]))
+      } else {
+        modeBuckets.get(meta.key).add(normalized)
+      }
+    })
+  })
+  const result = new Map()
+  modeBuckets.forEach((set, key) => {
+    if (set.size === 1) {
+      const [mode] = Array.from(set)
+      result.set(key, mode)
+    }
+  })
+  return result
 }
 
 function mergeRangeMap(target, source = {}) {
@@ -3006,9 +3114,9 @@ function resetContainerFilter(containerId, key) {
   requestContainerRefresh(containerId)
 }
 
-function handlePageFilterValuesChange(key, values, rangeOnly = false) {
+function handlePageFilterValuesChange(key, values, forcedMode = '') {
   pageFilterValues[key] = Array.isArray(values) ? [...values] : []
-  if (!rangeOnly) {
+  if (forcedMode !== 'range') {
     delete pageFilterRanges[key]
   }
 }
@@ -3143,6 +3251,10 @@ function editPage() {
   flex-direction: column;
   gap: 6px;
   flex: 1 1 220px;
+}
+.page-filter__label {
+  font-size: 13px;
+  color: #111827;
 }
 .page-filter input {
   border: 1px solid #d1d5db;
@@ -3332,8 +3444,8 @@ function editPage() {
   max-height: 4.05em;
 }
 .pivot-table {
-  --cell-padding-y: 12px;
-  --cell-padding-x: 12px;
+  --cell-padding-y: 9px;
+  --cell-padding-x: 10px;
   --group-divider-color: rgba(148, 163, 184, 0.18);
   --row-divider-color: rgba(203, 213, 225, 0.5);
   --row-hover-color: rgba(148, 163, 184, 0.12);
@@ -3347,8 +3459,8 @@ function editPage() {
   font-feature-settings: 'tnum' 1;
 }
 .pivot-table.table-density--compact {
-  --cell-padding-y: 10px;
-  --cell-padding-x: 10px;
+  --cell-padding-y: 7px;
+  --cell-padding-x: 8px;
   font-size: 12px;
 }
 .pivot-table th,
@@ -3395,6 +3507,9 @@ function editPage() {
   color: #1f2937;
   background: rgba(255, 255, 255, 0.98);
 }
+.pivot-table tbody td.cell {
+  text-align: right;
+}
 .pivot-table tbody td,
 .pivot-table tbody .row-label {
   border-top: 1px solid var(--row-divider-color);
@@ -3424,11 +3539,17 @@ function editPage() {
 .pivot-table .total,
 .pivot-table .grand-total {
   font-weight: 600;
-  border-top: 2px solid #cbd5f5;
-  color: #1d4ed8;
-  box-shadow: inset 0 3px 6px rgba(15, 23, 42, 0.04);
-  padding-left: calc(var(--cell-padding-x) + 6px);
-  border-left: 1px solid var(--group-divider-color);
+  border-top: 2px solid #dbeafe;
+  color: #0f172a;
+  background: linear-gradient(180deg, #eef2ff 0%, #e0e7ff 100%);
+  padding-left: calc(var(--cell-padding-x) + 4px);
+  border-left: 1px solid rgba(99, 102, 241, 0.25);
+}
+.pivot-table th.column-field-group--total,
+.pivot-table th.grand-total {
+  background: #eef2ff;
+  color: #312e81;
+  border-left: 1px solid rgba(99, 102, 241, 0.25);
 }
 .pivot-table tbody tr:hover td,
 .pivot-table tbody tr:hover .row-label {

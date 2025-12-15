@@ -17,6 +17,7 @@ import {
   defaultLayoutSettings,
   sanitizeContainerTabMap,
 } from '@/shared/lib/layoutMeta'
+import { DATE_PARTS, buildDatePartKey } from '@/shared/lib/pivotUtils'
 
 const LAYOUT_FACTOR_CODE = 'Prop_Layout'
 const WIDTH_FACTOR_CODE = 'Prop_Width'
@@ -900,7 +901,21 @@ function extractTemplateFieldKeys(template) {
   const metricKeys = (snapshot.metrics || [])
     .map((metric) => metric?.fieldKey)
     .filter(Boolean)
-  return Array.from(new Set([...metaKeys, ...filtersMetaKeys, ...pivotKeys, ...metricKeys]))
+  const datePartKeys = collectDatePartKeys(snapshot.fieldMeta || {})
+  return Array.from(
+    new Set([...metaKeys, ...filtersMetaKeys, ...pivotKeys, ...metricKeys, ...datePartKeys]),
+  )
+}
+
+function collectDatePartKeys(fieldMeta = {}) {
+  const keys = []
+  Object.entries(fieldMeta || {}).forEach(([key, meta]) => {
+    if (!meta || meta.type !== 'date') return
+    DATE_PARTS.forEach((part) => {
+      keys.push(buildDatePartKey(key, part.key))
+    })
+  })
+  return keys
 }
 
 function toNumericId(value) {
