@@ -17,6 +17,7 @@ import {
   CategoryScale,
   LinearScale,
   ArcElement,
+  Filler,
 } from 'chart.js'
 import { Bar, Line, Pie } from 'vue-chartjs'
 
@@ -30,6 +31,7 @@ ChartJS.register(
   CategoryScale,
   LinearScale,
   ArcElement,
+  Filler,
 )
 
 const props = defineProps({

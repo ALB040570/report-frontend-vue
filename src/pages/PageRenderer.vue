@@ -768,9 +768,13 @@ const chartPalette = [
   '#8b5cf6',
 ]
 const FILTER_META_VALUE_LIMIT = 20
+const GLOBAL_FILTER_RECORD_SCAN_LIMIT = 4000
+const GLOBAL_FILTER_OPTION_LIMIT = 200
 const EMPTY_SET = new Set()
 const pageFilterValues = reactive({})
 const pageFilterRanges = reactive({})
+const filteredGlobalOptions = reactive({})
+const filteredGlobalOptionRequests = new Set()
 const commonFilterKeys = computed(() =>
   resolveCommonContainerFieldKeys(pageContainers.value, store.templates),
 )
@@ -960,27 +964,35 @@ function isContainerRowCollapsed(containerId, nodeKey) {
 
 function ensurePageFilters(keys = []) {
   const rangeDefaults = globalFilterRangeDefaults.value
+  let changed = false
   keys.forEach((key) => {
     if (!(key in pageFilterValues)) {
       pageFilterValues[key] = []
+      changed = true
     }
     if (!(key in pageFilterRanges)) {
       const defaults = cloneRange(rangeDefaults.get(key))
       if (defaults && hasActiveRange(defaults)) {
         pageFilterRanges[key] = defaults
+        changed = true
       }
     }
   })
   Object.keys(pageFilterValues).forEach((key) => {
     if (!keys.includes(key)) {
       delete pageFilterValues[key]
+      changed = true
     }
   })
   Object.keys(pageFilterRanges).forEach((key) => {
     if (!keys.includes(key)) {
       delete pageFilterRanges[key]
+      changed = true
     }
   })
+  if (changed) {
+    notifyPageFiltersUpdated()
+  }
 }
 
 function templateFilters(container) {
@@ -2418,6 +2430,7 @@ function refreshContainers() {
   Object.keys(containerRowCollapse).forEach((id) => {
     if (!ids.has(id)) delete containerRowCollapse[id]
   })
+  invalidateFilteredGlobalOptions()
 }
 
 async function refreshPageData() {
@@ -2769,8 +2782,6 @@ function hasForcedFilterMode(filter) {
 }
 
 function globalFilterValueOptions(key) {
-  const dynamic = computeFilteredGlobalOptions(key)
-  if (dynamic.length) return dynamic
   return globalFilterValueMap.value.get(key) || []
 }
 
@@ -2784,19 +2795,66 @@ function hasActiveGlobalSelection(filterKey) {
 
 function computeFilteredGlobalOptions(targetKey) {
   if (!targetKey) return []
-  const hasOtherActive = activePageFilters.value.some(
+  if (!hasOtherActiveFilters(targetKey)) {
+    invalidateFilteredGlobalOptions(targetKey)
+    return []
+  }
+  const cached = filteredGlobalOptions[targetKey]
+  if (Array.isArray(cached)) return cached
+  refreshFilteredGlobalOptions(targetKey)
+  return []
+}
+
+function hasOtherActiveFilters(targetKey) {
+  return activePageFilters.value.some(
     (filter) => filter.key !== targetKey && hasActiveGlobalSelection(filter.key),
   )
-  if (!hasOtherActive) return []
+}
+
+function refreshFilteredGlobalOptions(targetKey) {
+  if (!targetKey || filteredGlobalOptionRequests.has(targetKey)) return
+  filteredGlobalOptionRequests.add(targetKey)
+  Promise.resolve().then(() => executeFilteredGlobalOptionsRequest(targetKey))
+}
+
+async function executeFilteredGlobalOptionsRequest(targetKey) {
+  try {
+    const localResult = collectLocalFilteredOptions(targetKey)
+    setFilteredGlobalOptions(targetKey, localResult.options)
+    const payload = buildRemoteFilterOptionPayload(targetKey)
+    if (!payload) return
+    const remote = await loadReportFilterOptions(payload)
+    if (Array.isArray(remote) && remote.length) {
+      setFilteredGlobalOptions(targetKey, remote)
+    }
+  } catch (err) {
+    console.warn('Failed to load filtered global options', err)
+  } finally {
+    filteredGlobalOptionRequests.delete(targetKey)
+  }
+}
+
+function collectLocalFilteredOptions(targetKey) {
+  if (!hasOtherActiveFilters(targetKey)) {
+    return { options: [] }
+  }
   const containers = pageContainers.value || []
-  if (!containers.length) return []
+  if (!containers.length) {
+    return { options: [] }
+  }
   const values = new Map()
-  containers.forEach((container) => {
+  let inspected = 0
+  outer: for (const container of containers) {
     const state = containerState(container.id)
     const records = state.rawRecords || []
-    if (!records.length) return
-    records.forEach((record) => {
-      if (!matchesGlobalFilters(record, targetKey)) return
+    if (!records.length) continue
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index]
+      inspected += 1
+      if (inspected > GLOBAL_FILTER_RECORD_SCAN_LIMIT) {
+        break outer
+      }
+      if (!matchesGlobalFilters(record, targetKey)) continue
       const resolvedValue = resolvePivotFieldValue(record, targetKey)
       const normalized = normalizeValue(resolvedValue)
       if (!values.has(normalized)) {
@@ -2805,14 +2863,120 @@ function computeFilteredGlobalOptions(targetKey) {
           normalized,
           display && display !== '—' ? display : normalized || 'пусто',
         )
+        if (values.size >= GLOBAL_FILTER_OPTION_LIMIT) {
+          break outer
+        }
       }
-    })
-  })
-  if (!values.size) return []
-  return Array.from(values.entries()).map(([value, label]) => ({
+    }
+  }
+  return { options: mapValuesToOptions(values) }
+}
+
+function mapValuesToOptions(map) {
+  if (!map || !map.size) return []
+  return Array.from(map.entries()).map(([value, label]) => ({
     value,
     label,
   }))
+}
+
+function setFilteredGlobalOptions(targetKey, options) {
+  const normalized = limitOptionList(options)
+  const current = filteredGlobalOptions[targetKey]
+  if (Array.isArray(current) && shallowEqualOptions(current, normalized)) {
+    return
+  }
+  filteredGlobalOptions[targetKey] = normalized
+}
+
+function shallowEqualOptions(a = [], b = []) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+  for (let index = 0; index < a.length; index += 1) {
+    const current = a[index] || {}
+    const next = b[index] || {}
+    if (current.value !== next.value) return false
+    if (current.label !== next.label) return false
+  }
+  return true
+}
+
+function limitOptionList(list = [], limit = GLOBAL_FILTER_OPTION_LIMIT) {
+  if (!Array.isArray(list) || !list.length) return []
+  const normalized = []
+  const seen = new Set()
+  for (let index = 0; index < list.length && normalized.length < limit; index += 1) {
+    const entry = list[index]
+    if (!entry) continue
+    const value = normalizeValue(entry.value)
+    if (seen.has(value)) continue
+    seen.add(value)
+    const label =
+      entry.label && entry.label !== '—'
+        ? String(entry.label)
+        : value || 'пусто'
+    normalized.push({ value, label })
+  }
+  return normalized
+}
+
+function invalidateFilteredGlobalOptions(targetKey) {
+  if (!targetKey) {
+    Object.keys(filteredGlobalOptions).forEach((key) => {
+      delete filteredGlobalOptions[key]
+    })
+    filteredGlobalOptionRequests.clear()
+    return
+  }
+  delete filteredGlobalOptions[targetKey]
+  filteredGlobalOptionRequests.delete(targetKey)
+}
+
+function buildRemoteFilterOptionPayload(targetKey) {
+  if (!targetKey) return null
+  const pageId = page.value?.id
+  if (!pageId) return null
+  const filters = activePageFilters.value
+    .filter((filter) => filter.key !== targetKey && hasActiveGlobalSelection(filter.key))
+    .map((filter) => ({
+      key: filter.key,
+      values: Array.isArray(pageFilterValues[filter.key])
+        ? [...pageFilterValues[filter.key]]
+        : [],
+      range: sanitizeRange(pageFilterRanges[filter.key]) || null,
+    }))
+  if (!filters.length) return null
+  return {
+    pageId,
+    filterKey: targetKey,
+    filters,
+    limit: GLOBAL_FILTER_OPTION_LIMIT,
+  }
+}
+
+function notifyPageFiltersUpdated() {
+  invalidateFilteredGlobalOptions()
+  scheduleRefresh()
+}
+
+function areValueArraysEqual(a = [], b = []) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+  for (let index = 0; index < a.length; index += 1) {
+    if (normalizeValue(a[index]) !== normalizeValue(b[index])) {
+      return false
+    }
+  }
+  return true
+}
+
+function areRangesEqual(a, b) {
+  if (!a && !b) return true
+  if (!a || !b) return false
+  return (
+    normalizeValue(a.start) === normalizeValue(b.start) &&
+    normalizeValue(a.end) === normalizeValue(b.end)
+  )
 }
 
 function buildGlobalFilterValueMap() {
@@ -3080,31 +3244,26 @@ watch(
   () => page.value?.filters,
   (keys = []) => {
     ensurePageFilters(keys)
+    invalidateFilteredGlobalOptions()
   },
   { immediate: true },
 )
 
-watch(
-  pageFilterValues,
-  () => {
-    scheduleRefresh()
-  },
-  { deep: true },
-)
-
-watch(
-  pageFilterRanges,
-  () => {
-    scheduleRefresh()
-  },
-  { deep: true },
-)
-
 function resetPageFilters() {
+  let changed = false
   activePageFilters.value.forEach((filter) => {
-    pageFilterValues[filter.key] = []
-    delete pageFilterRanges[filter.key]
+    if ((pageFilterValues[filter.key] || []).length) {
+      pageFilterValues[filter.key] = []
+      changed = true
+    }
+    if (pageFilterRanges[filter.key]) {
+      delete pageFilterRanges[filter.key]
+      changed = true
+    }
   })
+  if (changed) {
+    notifyPageFiltersUpdated()
+  }
 }
 
 function resetContainerFilter(containerId, key) {
@@ -3115,19 +3274,38 @@ function resetContainerFilter(containerId, key) {
 }
 
 function handlePageFilterValuesChange(key, values, forcedMode = '') {
-  pageFilterValues[key] = Array.isArray(values) ? [...values] : []
-  if (forcedMode !== 'range') {
+  const normalized = Array.isArray(values) ? [...values] : []
+  const current = pageFilterValues[key] || []
+  let changed = false
+  if (!areValueArraysEqual(current, normalized)) {
+    pageFilterValues[key] = normalized
+    changed = true
+  }
+  if (forcedMode !== 'range' && pageFilterRanges[key]) {
     delete pageFilterRanges[key]
+    changed = true
+  }
+  if (changed) {
+    notifyPageFiltersUpdated()
   }
 }
 
 function handlePageFilterRangeChange(key, range) {
   const sanitized = sanitizeRange(range)
+  const current = pageFilterRanges[key]
+  let changed = false
   if (sanitized) {
-    pageFilterRanges[key] = sanitized
-    pageFilterValues[key] = []
-  } else {
+    if (!areRangesEqual(current, sanitized)) {
+      pageFilterRanges[key] = sanitized
+      pageFilterValues[key] = []
+      changed = true
+    }
+  } else if (current) {
     delete pageFilterRanges[key]
+    changed = true
+  }
+  if (changed) {
+    notifyPageFiltersUpdated()
   }
 }
 

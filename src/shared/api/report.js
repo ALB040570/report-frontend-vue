@@ -98,5 +98,66 @@ export async function deleteObjectWithProperties(id) {
   return callReportMethod('report/deleteObjWithProperties', [id])
 }
 
+export async function loadReportFilterOptions(payload = {}) {
+  if (!payload || typeof payload !== 'object') return []
+  const data = await callReportMethod('report/loadReportFilterOptions', [payload])
+  return normalizeFilterOptionResponse(data)
+}
+
 export const ROW_TOTAL_META = { fv: 1074, pv: 1565 }
 export const COLUMN_TOTAL_META = { fv: 1075, pv: 1568 }
+
+function normalizeFilterOptionResponse(payload) {
+  const records = extractArray(payload)
+  if (!records.length) return []
+  return records
+    .map((entry) => normalizeFilterOptionEntry(entry))
+    .filter(Boolean)
+}
+
+function extractArray(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return Array.isArray(payload) ? payload : []
+  }
+  if (Array.isArray(payload.result?.records)) return payload.result.records
+  if (Array.isArray(payload.result)) return payload.result
+  if (Array.isArray(payload.records)) return payload.records
+  return []
+}
+
+function normalizeFilterOptionEntry(entry) {
+  if (entry == null) return null
+  if (typeof entry !== 'object') {
+    const value = String(entry)
+    return { value, label: value || 'пусто' }
+  }
+  const value =
+    entry.value ??
+    entry.Value ??
+    entry.code ??
+    entry.Code ??
+    entry.id ??
+    entry.Id ??
+    entry.key ??
+    entry.Key ??
+    ''
+  const label =
+    entry.label ??
+    entry.Label ??
+    entry.name ??
+    entry.Name ??
+    entry.title ??
+    entry.Title ??
+    value
+  const normalizedValue =
+    value === null || typeof value === 'undefined' ? '' : String(value)
+  const normalizedLabel =
+    label === null || typeof label === 'undefined'
+      ? normalizedValue || 'пусто'
+      : String(label) || 'пусто'
+  if (!normalizedValue && !normalizedLabel) return null
+  return {
+    value: normalizedValue,
+    label: normalizedLabel,
+  }
+}
