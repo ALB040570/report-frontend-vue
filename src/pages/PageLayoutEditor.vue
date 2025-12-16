@@ -105,10 +105,10 @@
         <label>
           <span>Вкладки</span>
           <input
+            v-model.number="draft.layout.settings.tabs"
             type="number"
             min="1"
             :max="MAX_TABS"
-            v-model.number="draft.layout.settings.tabs"
           />
         </label>
       </div>
@@ -214,7 +214,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, onMounted, watch } from 'vue'
+import { computed, reactive, ref, onMounted, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
@@ -293,15 +293,19 @@ const globalFilterSelectOptions = computed(() =>
     label: filter.label,
   })),
 )
-const layoutSettings = computed(() => {
+watchEffect(() => {
   if (!draft.layout.settings) {
     draft.layout.settings = defaultLayoutSettings()
+    return
   }
   if (!Array.isArray(draft.layout.settings.tabNames)) {
     draft.layout.settings.tabNames = [...defaultLayoutSettings().tabNames]
   }
-  return draft.layout.settings
 })
+
+const layoutSettings = computed(
+  () => draft.layout.settings || defaultLayoutSettings(),
+)
 const tabLabelEntries = computed(() => {
   const count = Number(layoutSettings.value.tabs) || 1
   const names = Array.isArray(layoutSettings.value.tabNames) ? layoutSettings.value.tabNames : []

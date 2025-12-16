@@ -633,8 +633,6 @@ import {
 import { defaultLayoutSettings } from '@/shared/lib/layoutMeta'
 import {
   canUserAccessPage,
-  isPagePrivate,
-  matchUserAccess,
   readStoredUserMeta,
   resolveUserMeta,
 } from '@/shared/lib/pageAccess'
@@ -838,29 +836,6 @@ const currentUserMeta = computed(() => {
   const personal = resolveUserMeta(authStore.personalInfo)
   if (personal) return personal
   return readStoredUserMeta()
-})
-const currentObjUser = computed(() => currentUserMeta.value?.objUser ?? null)
-const currentPvUser = computed(() => currentUserMeta.value?.pvUser ?? null)
-const isPrivatePage = computed(() => isPagePrivate(page.value))
-const isPageAuthor = computed(() =>
-  matchUserAccess(
-    currentObjUser.value,
-    currentPvUser.value,
-    page.value?.objUser,
-    page.value?.pvUser,
-  ),
-)
-const isWhitelistedUser = computed(() => {
-  const list = page.value?.privacy?.users
-  if (!Array.isArray(list)) return false
-  return list.some((user) =>
-    matchUserAccess(
-      currentObjUser.value,
-      currentPvUser.value,
-      user?.id,
-      user?.pv,
-    ),
-  )
 })
 const canViewPage = computed(() => canUserAccessPage(page.value, currentUserMeta.value))
 let refreshTimer = null
