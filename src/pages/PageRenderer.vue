@@ -631,13 +631,7 @@ import {
   parseJoinConfig,
 } from '@/shared/lib/sourceJoins.js'
 import { defaultLayoutSettings } from '@/shared/lib/layoutMeta'
-import {
-  canUserAccessPage,
-  isPagePrivate,
-  matchUserAccess,
-  readStoredUserMeta,
-  resolveUserMeta,
-} from '@/shared/lib/pageAccess'
+import { canUserAccessPage, readStoredUserMeta, resolveUserMeta } from '@/shared/lib/pageAccess'
 const route = useRoute()
 const router = useRouter()
 const store = usePageBuilderStore()
@@ -666,6 +660,7 @@ onMounted(async () => {
   if (pageId.value) {
     await store.fetchPageContainers(pageId.value, true)
   }
+  refreshContainers()
 })
 
 watch(
@@ -678,6 +673,7 @@ watch(
         store.fetchPrivacyOptions(),
       ])
       await store.fetchPageContainers(next, true)
+      refreshContainers()
     }
   },
 )
@@ -838,29 +834,6 @@ const currentUserMeta = computed(() => {
   const personal = resolveUserMeta(authStore.personalInfo)
   if (personal) return personal
   return readStoredUserMeta()
-})
-const currentObjUser = computed(() => currentUserMeta.value?.objUser ?? null)
-const currentPvUser = computed(() => currentUserMeta.value?.pvUser ?? null)
-const isPrivatePage = computed(() => isPagePrivate(page.value))
-const isPageAuthor = computed(() =>
-  matchUserAccess(
-    currentObjUser.value,
-    currentPvUser.value,
-    page.value?.objUser,
-    page.value?.pvUser,
-  ),
-)
-const isWhitelistedUser = computed(() => {
-  const list = page.value?.privacy?.users
-  if (!Array.isArray(list)) return false
-  return list.some((user) =>
-    matchUserAccess(
-      currentObjUser.value,
-      currentPvUser.value,
-      user?.id,
-      user?.pv,
-    ),
-  )
 })
 const canViewPage = computed(() => canUserAccessPage(page.value, currentUserMeta.value))
 let refreshTimer = null
@@ -1836,6 +1809,18 @@ function sanitizeRange(range) {
 function hasActiveRange(range) {
   if (!range || typeof range !== 'object') return false
   return isDefinedRangeValue(range.start) || isDefinedRangeValue(range.end)
+}
+
+function rangesEqual(a, b) {
+  if (!a && !b) return true
+  if (!a || !b) return false
+  return a.start === b.start && a.end === b.end
+}
+
+function areValueArraysEqual(a = [], b = []) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+  return a.every((value, index) => value === b[index])
 }
 
 function inferRangeType(range, descriptor = null) {
@@ -3061,22 +3046,6 @@ function requestContainerRefresh(containerId) {
 }
 
 watch(
-  () => pageContainers.value,
-  () => {
-    refreshContainers()
-  },
-  { immediate: true, deep: true },
-)
-
-watch(
-  () => store.templates,
-  () => {
-    refreshContainers()
-  },
-  { deep: true },
-)
-
-watch(
   () => page.value?.filters,
   (keys = []) => {
     ensurePageFilters(keys)
@@ -3115,7 +3084,14 @@ function resetContainerFilter(containerId, key) {
 }
 
 function handlePageFilterValuesChange(key, values, forcedMode = '') {
-  pageFilterValues[key] = Array.isArray(values) ? [...values] : []
+  const next = Array.isArray(values) ? [...values] : []
+  if (areValueArraysEqual(pageFilterValues[key], next)) {
+    if (forcedMode !== 'range' && pageFilterRanges[key]) {
+      delete pageFilterRanges[key]
+    }
+    return
+  }
+  pageFilterValues[key] = next
   if (forcedMode !== 'range') {
     delete pageFilterRanges[key]
   }
@@ -3123,10 +3099,18 @@ function handlePageFilterValuesChange(key, values, forcedMode = '') {
 
 function handlePageFilterRangeChange(key, range) {
   const sanitized = sanitizeRange(range)
+  const current = pageFilterRanges[key]
   if (sanitized) {
-    pageFilterRanges[key] = sanitized
-    pageFilterValues[key] = []
-  } else {
+    const changed = !rangesEqual(current, sanitized)
+    if (changed) {
+      pageFilterRanges[key] = sanitized
+    }
+    if (pageFilterValues[key]?.length) {
+      pageFilterValues[key] = []
+    }
+    return
+  }
+  if (current) {
     delete pageFilterRanges[key]
   }
 }
@@ -3134,7 +3118,16 @@ function handlePageFilterRangeChange(key, range) {
 function handleContainerFilterValuesChange(containerId, filter, values) {
   const key = filter.key
   const store = containerFilterStore(containerId)
-  store[key] = Array.isArray(values) ? [...values] : []
+  const next = Array.isArray(values) ? [...values] : []
+  const current = store[key] || []
+  if (areValueArraysEqual(current, next)) {
+    if (!isContainerRangeFilter(filter)) {
+      delete containerRangeStore(containerId)[key]
+      requestContainerRefresh(containerId)
+    }
+    return
+  }
+  store[key] = next
   if (!isContainerRangeFilter(filter)) {
     delete containerRangeStore(containerId)[key]
   }
@@ -3145,13 +3138,25 @@ function handleContainerFilterRangeChange(containerId, filter, range) {
   const key = filter.key
   const rangeStore = containerRangeStore(containerId)
   const sanitized = sanitizeRange(range)
+  const currentRange = rangeStore[key]
+  const filterStore = containerFilterStore(containerId)
   if (sanitized) {
-    rangeStore[key] = sanitized
-    containerFilterStore(containerId)[key] = []
-  } else {
-    delete rangeStore[key]
+    const changedRange = !rangesEqual(currentRange, sanitized)
+    if (changedRange) {
+      rangeStore[key] = sanitized
+    }
+    if (filterStore[key]?.length) {
+      filterStore[key] = []
+    }
+    if (changedRange || filterStore[key]?.length === 0) {
+      requestContainerRefresh(containerId)
+    }
+    return
   }
-  requestContainerRefresh(containerId)
+  if (currentRange) {
+    delete rangeStore[key]
+    requestContainerRefresh(containerId)
+  }
 }
 
 onBeforeUnmount(() => {
