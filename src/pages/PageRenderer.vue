@@ -142,7 +142,7 @@
               <FilterRangeControl
                 :model-value="containerFilterValues[container.id][filter.key]"
                 :range="containerFilterRanges[container.id]?.[filter.key]"
-                :options="fieldOptions(filter)"
+                :options="containerFilterOptions(container.id, filter)"
                 :supports-range="
                   filterSupportsRange(filter) && !isValuesOnlyFilter(filter)
                 "
@@ -734,6 +734,8 @@ const layoutStyle = computed(() => {
 const containerStates = reactive({})
 const containerFilterValues = reactive({})
 const containerFilterRanges = reactive({})
+const availablePageFilterValues = reactive({})
+const availableContainerFilterValues = reactive({})
 const containerRefreshTimers = reactive({})
 const containerTableSizing = reactive({})
 const containerRowCollapse = reactive({})
@@ -1006,8 +1008,8 @@ function ensureContainerFilters(containerId, tpl) {
   })
 }
 
-function fieldOptions(filter) {
-  return (filter.values || []).map((value) => ({
+function fieldOptionsFromValues(values = []) {
+  return (values || []).map((value) => ({
     value,
     label: value || 'пусто',
   }))
@@ -1016,6 +1018,12 @@ function fieldOptions(filter) {
 function templateOptions(container) {
   const tpl = template(container.templateId)
   return tpl?.snapshot?.options || {}
+}
+
+function containerFilterOptions(containerId, filter) {
+  const available = availableContainerFilterValues[containerId]?.[filter.key]
+  if (Array.isArray(available) && available.length) return available
+  return fieldOptionsFromValues(filter.values)
 }
 
 function rowTotalsAllowed(container) {
@@ -1900,29 +1908,33 @@ function valueSatisfiesRange(rawValue, range, descriptor = null) {
   return true
 }
 
-function matchesGlobalFilters(record, skipKey = null) {
+function matchesGlobalFilters(record, excludeKey = null) {
   if (!activePageFilters.value.length) return true
+
   return activePageFilters.value.every((filter) => {
-    if (filter.key === skipKey) return true
-    const values = pageFilterValues[filter.key]
+    const key = filter?.key
+    if (!key) return true
+    if (excludeKey && key === excludeKey) return true
+
+    const values = pageFilterValues[key]
     if (Array.isArray(values) && values.length) {
-      const recordValue = normalizeValue(
-        resolvePivotFieldValue(record, filter.key),
-      )
-      if (!recordValue && recordValue !== '') return false
+      const recordValue = normalizeValue(resolvePivotFieldValue(record, key))
       if (!values.includes(recordValue)) return false
     }
-    const range = pageFilterRanges[filter.key]
+
+    const range = pageFilterRanges[key]
     if (range && hasActiveRange(range)) {
-      const dateMeta = parseDatePartKey(filter.key)
+      const dateMeta = parseDatePartKey(key)
       const descriptor =
-        globalFieldMetaMap.value.get(filter.key) ||
+        globalFieldMetaMap.value.get(key) ||
         (dateMeta ? globalFieldMetaMap.value.get(dateMeta.fieldKey) : null)
-      const resolvedValue = resolvePivotFieldValue(record, filter.key)
+
+      const resolvedValue = resolvePivotFieldValue(record, key)
       if (!valueSatisfiesRange(resolvedValue, range, descriptor)) {
         return false
       }
     }
+
     return true
   })
 }
@@ -2379,6 +2391,8 @@ async function hydrateContainer(container) {
     state.error = err?.message || 'Не удалось построить виджет.'
   } finally {
     state.loading = false
+    recalcContainerFilterOptions(container.id)
+    recalcPageFilterOptions()
   }
 }
 
@@ -2403,6 +2417,8 @@ function refreshContainers() {
   Object.keys(containerRowCollapse).forEach((id) => {
     if (!ids.has(id)) delete containerRowCollapse[id]
   })
+  recalcPageFilterOptions()
+  recalcAllContainerFilterOptions()
 }
 
 async function refreshPageData() {
@@ -2756,23 +2772,13 @@ function hasForcedFilterMode(filter) {
 function globalFilterValueOptions(key) {
   const dynamic = computeFilteredGlobalOptions(key)
   if (dynamic.length) return dynamic
+  const available = availablePageFilterValues[key]
+  if (Array.isArray(available) && available.length) return available
   return globalFilterValueMap.value.get(key) || []
-}
-
-function hasActiveGlobalSelection(filterKey) {
-  const values = pageFilterValues[filterKey]
-  if (Array.isArray(values) && values.length) return true
-  const range = pageFilterRanges[filterKey]
-  if (range && hasActiveRange(range)) return true
-  return false
 }
 
 function computeFilteredGlobalOptions(targetKey) {
   if (!targetKey) return []
-  const hasOtherActive = activePageFilters.value.some(
-    (filter) => filter.key !== targetKey && hasActiveGlobalSelection(filter.key),
-  )
-  if (!hasOtherActive) return []
   const containers = pageContainers.value || []
   if (!containers.length) return []
   const values = new Map()
@@ -2782,6 +2788,7 @@ function computeFilteredGlobalOptions(targetKey) {
     if (!records.length) return
     records.forEach((record) => {
       if (!matchesGlobalFilters(record, targetKey)) return
+      if (!matchesContainerFilters(record, container)) return
       const resolvedValue = resolvePivotFieldValue(record, targetKey)
       const normalized = normalizeValue(resolvedValue)
       if (!values.has(normalized)) {
@@ -2798,6 +2805,171 @@ function computeFilteredGlobalOptions(targetKey) {
     value,
     label,
   }))
+}
+
+function matchesContainerFilters(record, container, excludeKey = null) {
+  const tpl = template(container.templateId)
+  // Если шаблон или snapshot ещё не загружены, контейнер не должен отбрасывать записи
+  if (!tpl || !tpl.snapshot) return true
+  const snapshot = tpl.snapshot
+  const fieldMetaMap = new Map(Object.entries(snapshot.fieldMeta || {}))
+  const filterValues = { ...(snapshot.filterValues || {}) }
+  const filterRanges = { ...(snapshot.filterRanges || {}) }
+  if (excludeKey) {
+    delete filterValues[excludeKey]
+    delete filterRanges[excludeKey]
+  }
+  const overrides = containerFilterValues[container.id] || {}
+  Object.entries(overrides).forEach(([key, values]) => {
+    if (key === excludeKey) return
+    filterValues[key] = [...values]
+  })
+  const rangeOverrides = containerFilterRanges[container.id] || {}
+  Object.entries(rangeOverrides).forEach(([key, range]) => {
+    if (key === excludeKey) return
+    const sanitized = sanitizeRange(range)
+    if (sanitized) {
+      filterRanges[key] = sanitized
+    } else {
+      delete filterRanges[key]
+    }
+  })
+  const dimensionValues = snapshot.dimensionValues || {}
+  const dimensionRanges = snapshot.dimensionRanges || {}
+  if (
+    !matchFieldSet(
+      record,
+      snapshot.pivot?.filters,
+      filterValues,
+      filterRanges,
+      fieldMetaMap,
+    )
+  )
+    return false
+  if (
+    !matchFieldSet(
+      record,
+      snapshot.pivot?.rows,
+      dimensionValues.rows || {},
+      dimensionRanges.rows || {},
+      fieldMetaMap,
+    )
+  )
+    return false
+  if (
+    !matchFieldSet(
+      record,
+      snapshot.pivot?.columns,
+      dimensionValues.columns || {},
+      dimensionRanges.columns || {},
+      fieldMetaMap,
+    )
+  )
+    return false
+  return true
+}
+
+function collectAvailableValues(records = [], key) {
+  if (!Array.isArray(records) || !records.length) return new Map()
+  const values = new Map()
+  records.forEach((record) => {
+    const resolvedValue = resolvePivotFieldValue(record, key)
+    const normalized = normalizeValue(resolvedValue)
+    if (!values.has(normalized)) {
+      const display = formatValue(resolvedValue)
+      values.set(
+        normalized,
+        display && display !== '—' ? display : normalized || 'пусто',
+      )
+    }
+  })
+  return values
+}
+
+function recalcPageFilterOptions() {
+  const keys = activePageFilters.value.map((filter) => filter.key)
+  const containers = pageContainers.value || []
+  const result = {}
+  keys.forEach((key) => {
+    const values = new Map()
+    containers.forEach((container) => {
+      const state = containerState(container.id)
+      const records = state.rawRecords || []
+      if (!records.length) return
+      const filtered = records.filter(
+        (record) =>
+          matchesGlobalFilters(record, key) &&
+          matchesContainerFilters(record, container),
+      )
+      const collected = collectAvailableValues(filtered, key)
+      collected.forEach((label, value) => {
+        if (!values.has(value)) values.set(value, label)
+      })
+    })
+    result[key] = Array.from(values.entries()).map(([value, label]) => ({
+      value,
+      label,
+    }))
+  })
+  Object.keys(availablePageFilterValues).forEach((key) => {
+    if (!keys.includes(key)) {
+      delete availablePageFilterValues[key]
+    }
+  })
+  Object.entries(result).forEach(([key, options]) => {
+    availablePageFilterValues[key] = options
+  })
+}
+
+function recalcContainerFilterOptions(containerId) {
+  const container = (pageContainers.value || []).find(
+    (item) => item.id === containerId,
+  )
+  if (!container) {
+    delete availableContainerFilterValues[containerId]
+    return
+  }
+  const filters = templateFilters(container)
+  if (!filters.length) {
+    delete availableContainerFilterValues[containerId]
+    return
+  }
+  const state = containerState(container.id)
+  const records = state.rawRecords || []
+  const bucket = availableContainerFilterValues[containerId] || {}
+  const next = {}
+  filters.forEach((filter) => {
+    const filtered = records.filter(
+      (record) =>
+        matchesGlobalFilters(record) &&
+        matchesContainerFilters(record, container, filter.key),
+    )
+    const collected = collectAvailableValues(filtered, filter.key)
+    next[filter.key] = Array.from(collected.entries()).map(
+      ([value, label]) => ({
+        value,
+        label,
+      }),
+    )
+  })
+  Object.keys(bucket).forEach((key) => {
+    if (!next[key]) {
+      delete bucket[key]
+    }
+  })
+  Object.entries(next).forEach(([key, options]) => {
+    if (!availableContainerFilterValues[containerId]) {
+      availableContainerFilterValues[containerId] = {}
+    }
+    availableContainerFilterValues[containerId][key] = options
+  })
+}
+
+function recalcAllContainerFilterOptions() {
+  const containers = pageContainers.value || []
+  containers.forEach((container) => {
+    recalcContainerFilterOptions(container.id)
+  })
 }
 
 function buildGlobalFilterValueMap() {
@@ -3095,6 +3267,12 @@ function handlePageFilterValuesChange(key, values, forcedMode = '') {
   if (forcedMode !== 'range') {
     delete pageFilterRanges[key]
   }
+  recalcPageFilterOptions()
+  recalcAllContainerFilterOptions()
+  if (forcedMode === 'range') {
+    return
+  }
+  scheduleRefresh()
 }
 
 function handlePageFilterRangeChange(key, range) {
@@ -3108,11 +3286,17 @@ function handlePageFilterRangeChange(key, range) {
     if (pageFilterValues[key]?.length) {
       pageFilterValues[key] = []
     }
+    recalcPageFilterOptions()
+    recalcAllContainerFilterOptions()
+    scheduleRefresh()
     return
   }
   if (current) {
     delete pageFilterRanges[key]
   }
+  recalcPageFilterOptions()
+  recalcAllContainerFilterOptions()
+  scheduleRefresh()
 }
 
 function handleContainerFilterValuesChange(containerId, filter, values) {
@@ -3131,6 +3315,8 @@ function handleContainerFilterValuesChange(containerId, filter, values) {
   if (!isContainerRangeFilter(filter)) {
     delete containerRangeStore(containerId)[key]
   }
+  recalcContainerFilterOptions(containerId)
+  recalcPageFilterOptions()
   requestContainerRefresh(containerId)
 }
 
@@ -3149,6 +3335,8 @@ function handleContainerFilterRangeChange(containerId, filter, range) {
       filterStore[key] = []
     }
     if (changedRange || filterStore[key]?.length === 0) {
+      recalcContainerFilterOptions(containerId)
+      recalcPageFilterOptions()
       requestContainerRefresh(containerId)
     }
     return
@@ -3157,6 +3345,8 @@ function handleContainerFilterRangeChange(containerId, filter, range) {
     delete rangeStore[key]
     requestContainerRefresh(containerId)
   }
+  recalcContainerFilterOptions(containerId)
+  recalcPageFilterOptions()
 }
 
 onBeforeUnmount(() => {
