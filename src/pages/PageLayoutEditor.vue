@@ -105,10 +105,10 @@
         <label>
           <span>Вкладки</span>
           <input
+            v-model.number="draft.layout.settings.tabs"
             type="number"
             min="1"
             :max="MAX_TABS"
-            v-model.number="draft.layout.settings.tabs"
           />
         </label>
       </div>
@@ -214,7 +214,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, onMounted, watch } from 'vue'
+import { computed, reactive, ref, onMounted, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageBuilderStore, resolveCommonContainerFieldKeys } from '@/shared/stores/pageBuilder'
 import { useFieldDictionaryStore } from '@/shared/stores/fieldDictionary'
@@ -263,6 +263,15 @@ const draft = reactive({
   },
 })
 
+watchEffect(() => {
+  if (!draft.layout.settings) {
+    draft.layout.settings = defaultLayoutSettings()
+  }
+  if (!Array.isArray(draft.layout.settings.tabNames)) {
+    draft.layout.settings.tabNames = [...defaultLayoutSettings().tabNames]
+  }
+})
+
 const templates = computed(() => store.templates)
 const templatesLoading = computed(() => store.templatesLoading)
 const templatesError = computed(() => store.templatesError)
@@ -294,13 +303,14 @@ const globalFilterSelectOptions = computed(() =>
   })),
 )
 const layoutSettings = computed(() => {
-  if (!draft.layout.settings) {
-    draft.layout.settings = defaultLayoutSettings()
+  const settings = draft.layout.settings || defaultLayoutSettings()
+  const tabNames = Array.isArray(settings.tabNames)
+    ? settings.tabNames
+    : [...defaultLayoutSettings().tabNames]
+  return {
+    ...settings,
+    tabNames,
   }
-  if (!Array.isArray(draft.layout.settings.tabNames)) {
-    draft.layout.settings.tabNames = [...defaultLayoutSettings().tabNames]
-  }
-  return draft.layout.settings
 })
 const tabLabelEntries = computed(() => {
   const count = Number(layoutSettings.value.tabs) || 1
