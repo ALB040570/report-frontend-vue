@@ -602,6 +602,11 @@ import {
 } from '@/shared/stores/pageBuilder'
 import { useAuthStore } from '@/shared/stores/auth'
 import { fetchRemoteRecords } from '@/shared/services/dataSources'
+import {
+  fetchBackendView,
+  isPivotBackendEnabled,
+  normalizeBackendView,
+} from '@/shared/services/reportViewBackend'
 import ReportChart from '@/components/ReportChart.vue'
 import ConditionalCellValue from '@/components/ConditionalCellValue.vue'
 import {
@@ -637,6 +642,7 @@ const dictionaryLabels = computed(() => fieldDictionaryStore.labelMap || {})
 const dictionaryLabelsLower = computed(
   () => fieldDictionaryStore.labelMapLower || {},
 )
+const pivotBackendEnabled = isPivotBackendEnabled()
 
 onMounted(async () => {
   await Promise.all([
@@ -1700,6 +1706,50 @@ function filterRecords(records, snapshot, source, containerId) {
   })
 }
 
+function buildBackendFilters(containerId) {
+  const globalValues = activePageFilters.value.reduce((acc, filter) => {
+    const values = pageFilterValues[filter.key]
+    if (Array.isArray(values) && values.length) {
+      acc[filter.key] = [...values]
+    }
+    return acc
+  }, {})
+  const globalRanges = activePageFilters.value.reduce((acc, filter) => {
+    const range = sanitizeRange(pageFilterRanges[filter.key])
+    if (range) {
+      acc[filter.key] = range
+    }
+    return acc
+  }, {})
+  const containerValues = Object.entries(
+    containerFilterValues[containerId] || {},
+  ).reduce((acc, [key, values]) => {
+    if (Array.isArray(values) && values.length) {
+      acc[key] = [...values]
+    }
+    return acc
+  }, {})
+  const containerRanges = Object.entries(
+    containerFilterRanges[containerId] || {},
+  ).reduce((acc, [key, range]) => {
+    const sanitized = sanitizeRange(range)
+    if (sanitized) {
+      acc[key] = sanitized
+    }
+    return acc
+  }, {})
+  return {
+    globalFilters: {
+      values: globalValues,
+      ranges: globalRanges,
+    },
+    containerFilters: {
+      values: containerValues,
+      ranges: containerRanges,
+    },
+  }
+}
+
 function prepareMetrics(list = []) {
   return (list || [])
     .filter((metric) =>
@@ -1993,6 +2043,7 @@ async function hydrateContainer(container) {
   state.view = null
   state.chart = null
   state.records = []
+  state.rawRecords = []
   state.meta.rowTotalsAllowed = new Set()
   state.meta.columnTotalsAllowed = new Set()
   state.meta.metricGroups = []
@@ -2000,15 +2051,6 @@ async function hydrateContainer(container) {
   state.meta.rowHeaderTitle = 'Строки'
 
   try {
-    const records = await ensureTemplateData(tpl)
-    state.rawRecords = Array.isArray(records) ? records : []
-    const filtered = filterRecords(
-      records,
-      tpl.snapshot,
-      tpl.dataSource,
-      container.id,
-    )
-    state.records = filtered
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
     const rowTotalsAllowed = new Set(
       metrics
@@ -2037,25 +2079,56 @@ async function hydrateContainer(container) {
     if (!hasBaseMetric) {
       throw new Error('Добавьте хотя бы одну базовую метрику в представлении.')
     }
-    let baseView
-    try {
-      const sortsToApply = tpl.snapshot?.options?.sorts || {}
-      baseView = buildPivotView({
-        records: filtered,
-        rows: tpl.snapshot?.pivot?.rows || [],
-        columns: tpl.snapshot?.pivot?.columns || [],
-        metrics: baseMetrics,
-        fieldMeta: templateFieldMetaMap(tpl),
-        headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
-        sorts: sortsToApply,
-      })
-    } catch (err) {
-      if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
-        throw new Error(
-          `Метрика с типом «Значение» использует несколько записей на одну ячейку. Скорректируйте конфигурацию на вкладке «Данные».`,
-        )
+    if (!tpl.remoteSource) {
+      throw new Error('В представлении не выбран источник данных.')
+    }
+
+    let baseView = null
+    if (pivotBackendEnabled) {
+      // TODO: pivot расчёт перенесён на FastAPI-бэк (/api/report/view).
+      // Локальный buildPivotView оставлен как fallback до полной миграции.
+      try {
+        const { view: backendView } = await fetchBackendView({
+          templateId: tpl.id,
+          remoteSource: tpl.remoteSource,
+          snapshot: tpl.snapshot,
+          filters: buildBackendFilters(container.id),
+        })
+        baseView = normalizeBackendView(backendView, baseMetrics)
+      } catch (err) {
+        console.warn('Failed to build backend pivot view', err)
       }
-      throw err
+    }
+
+    if (!baseView) {
+      const records = await ensureTemplateData(tpl)
+      state.rawRecords = Array.isArray(records) ? records : []
+      const filtered = filterRecords(
+        records,
+        tpl.snapshot,
+        tpl.dataSource,
+        container.id,
+      )
+      state.records = filtered
+      try {
+        const sortsToApply = tpl.snapshot?.options?.sorts || {}
+        baseView = buildPivotView({
+          records: filtered,
+          rows: tpl.snapshot?.pivot?.rows || [],
+          columns: tpl.snapshot?.pivot?.columns || [],
+          metrics: baseMetrics,
+          fieldMeta: templateFieldMetaMap(tpl),
+          headerOverrides: tpl.snapshot?.options?.headerOverrides || {},
+          sorts: sortsToApply,
+        })
+      } catch (err) {
+        if (err?.code === 'VALUE_AGGREGATION_COLLISION') {
+          throw new Error(
+            `Метрика с типом «Значение» использует несколько записей на одну ячейку. Скорректируйте конфигурацию на вкладке «Данные».`,
+          )
+        }
+        throw err
+      }
     }
     const augmented = augmentPivotViewWithFormulas(baseView, metrics)
     const visibleView = filterPivotViewByVisibility(augmented, metrics)
