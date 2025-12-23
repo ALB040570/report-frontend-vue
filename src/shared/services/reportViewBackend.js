@@ -12,6 +12,7 @@ export async function fetchBackendView({
   remoteSource,
   snapshot,
   filters,
+  signal,
 }) {
   const baseUrl = normalizeBackendUrl(RAW_BACKEND_URL)
   if (!baseUrl) {
@@ -30,6 +31,7 @@ export async function fetchBackendView({
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(payload),
+    signal,
   })
   if (!response.ok) {
     const details = await safeReadResponseText(response)
@@ -41,6 +43,42 @@ export async function fetchBackendView({
     view: data?.view || null,
     chart: data?.chart || null,
   }
+}
+
+export async function fetchBackendFilters({
+  templateId = '',
+  remoteSource,
+  snapshot,
+  filters,
+  limit,
+  signal,
+}) {
+  const baseUrl = normalizeBackendUrl(RAW_BACKEND_URL)
+  if (!baseUrl) {
+    console.error('VITE_REPORT_BACKEND_URL is missing')
+    throw new Error('Не задан адрес сервиса построения отчётов.')
+  }
+  const payload = {
+    templateId,
+    remoteSource,
+    snapshot,
+    filters,
+  }
+  const query = Number.isFinite(limit) ? `?limit=${limit}` : ''
+  const response = await fetch(`${baseUrl}/api/report/filters${query}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  })
+  if (!response.ok) {
+    const details = await safeReadResponseText(response)
+    console.error('Report filters backend error', response.status, details)
+    throw new Error('Не удалось получить значения фильтров.')
+  }
+  return response.json()
 }
 
 export function normalizeBackendView(backendView, metrics = []) {

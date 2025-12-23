@@ -586,9 +586,11 @@ onMounted(async () => {
   }
 })
 
-async function loadExistingPage() {
+async function loadExistingPage(targetId = pageId.value, { force = true } = {}) {
+  loadError.value = ''
   deletedContainerIds.value = []
-  const existing = store.getPageById(pageId.value)
+  const resolvedId = String(targetId || '')
+  const existing = store.getPageById(resolvedId)
   if (!existing) {
     loadError.value = 'Страница не найдена или удалена.'
     return
@@ -618,7 +620,9 @@ async function loadExistingPage() {
     : defaultLayoutSettings()
   draft.layout.containerTabs = { ...(existing.layout?.containerTabs || {}) }
   syncTabNames(draft.layout.settings?.tabs || 1)
-  const containers = await store.fetchPageContainers(existing.id, true)
+  const containers = force
+    ? await store.fetchPageContainers(existing.id, true)
+    : store.getContainers(existing.id)
   draft.layout.containers.splice(0, draft.layout.containers.length)
   containers.forEach((container, index) => {
     draft.layout.containers.push({
@@ -729,9 +733,12 @@ async function save() {
   try {
     const payload = JSON.parse(JSON.stringify(draft))
     payload.layout.preset = draft.layout.preset
-    const pageId = await store.savePageDraft(payload, deletedContainerIds.value)
+    const savedId = await store.savePageDraft(payload, deletedContainerIds.value)
     deletedContainerIds.value = []
-    router.push(`/pages/${pageId}/edit`)
+    if (route.params.pageId !== String(savedId)) {
+      await router.push(`/pages/${savedId}/edit`)
+    }
+    await loadExistingPage(savedId, { force: false })
   } catch (err) {
     console.warn('Failed to save page', err)
     alert('Не удалось сохранить страницу. Попробуйте позже.')

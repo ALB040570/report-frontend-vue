@@ -672,7 +672,7 @@
                     :key="column.key"
                     :style="columnStyle(column.key)"
                   >
-                    {{ column.label }}
+                    {{ resolveColumnHeaderLabel(column) }}
                   </th>
                   <template v-if="hasRowTotals">
                     <th
@@ -704,7 +704,7 @@
                         {{ isRowCollapsed(row.key) ? '+' : '−' }}
                       </button>
                       <div class="row-content">
-                        <span>{{ row.label }}</span>
+                        <span>{{ resolveRowHeaderLabel(row) }}</span>
                       </div>
                     </div>
                     <span
@@ -2402,6 +2402,7 @@ const backendPivotState = reactive({
   error: '',
   loading: false,
   signature: '',
+  inFlightSignature: '',
 })
 
 function resolveBackendTemplateId() {
@@ -2524,10 +2525,18 @@ watch(
       backendPivotState.error = ''
       backendPivotState.loading = false
       backendPivotState.signature = ''
+      backendPivotState.inFlightSignature = ''
       return
     }
     if (backendPivotState.signature === signature) return
+    if (
+      backendPivotState.loading &&
+      backendPivotState.inFlightSignature === signature
+    ) {
+      return
+    }
     backendPivotState.signature = signature
+    backendPivotState.inFlightSignature = signature
     backendPivotState.loading = true
     backendPivotState.error = ''
     backendPivotState.view = null
@@ -2549,6 +2558,9 @@ watch(
       backendPivotState.chart = null
     } finally {
       backendPivotState.loading = false
+      if (backendPivotState.inFlightSignature === signature) {
+        backendPivotState.inFlightSignature = ''
+      }
     }
   },
   { immediate: true },
@@ -5257,9 +5269,54 @@ function groupColumnsByLevel(columns, levelIndex) {
 }
 
 function getColumnLevelValue(column, levelIndex) {
+  const values = Array.isArray(column?.values) ? column.values : []
+  if (values.length && levelIndex < values.length) {
+    const raw = values[levelIndex]
+    if (raw !== null && typeof raw !== 'undefined' && raw !== '') {
+      return formatValue(raw)
+    }
+  }
   const level = column.levels?.[levelIndex]
   if (!level) return 'Итого'
   return level.value || '—'
+}
+
+function resolveRowHeaderLabel(row) {
+  const values = Array.isArray(row?.values) ? row.values : []
+  if (values.length) {
+    const parts = values
+      .map((value) => formatValue(value))
+      .filter((value) => value && value !== '—')
+    if (parts.length) {
+      if (import.meta.env.DEV) {
+        console.debug('pivot row header', row?.key, row?.values, row?.label)
+      }
+      return parts.join(' • ')
+    }
+  }
+  if (import.meta.env.DEV) {
+    console.debug('pivot row header', row?.key, row?.values, row?.label)
+  }
+  return row?.label || row?.key || ''
+}
+
+function resolveColumnHeaderLabel(column) {
+  const values = Array.isArray(column?.values) ? column.values : []
+  if (values.length) {
+    const parts = values
+      .map((value) => formatValue(value))
+      .filter((value) => value && value !== '—')
+    if (parts.length) {
+      if (import.meta.env.DEV) {
+        console.debug('pivot col header', column?.key, column?.values, column?.label)
+      }
+      return parts.join(' • ')
+    }
+  }
+  if (import.meta.env.DEV) {
+    console.debug('pivot col header', column?.key, column?.values, column?.label)
+  }
+  return column?.label || column?.key || ''
 }
 
 function getRawFieldLabel(key) {
