@@ -32,8 +32,8 @@
       </div>
     </header>
 
-    <div v-if="activePageFilters.length" class="page-filters">
-      <div class="page-filters__fields">
+    <div v-if="hasResolvedPageFilters" class="page-filters">
+      <div v-if="activePageFilters.length" class="page-filters__fields">
         <div
           v-for="filter in activePageFilters"
           :key="filter.key"
@@ -63,6 +63,7 @@
           />
         </div>
       </div>
+      <p v-else class="muted">Нет доступных фильтров для этой вкладки.</p>
       <div class="page-filters__actions">
         <button
           class="btn-outline btn-sm"
@@ -655,6 +656,7 @@ onMounted(async () => {
   if (pageId.value) {
     await store.fetchPageContainers(pageId.value, true)
   }
+  resetTabFilterState()
   refreshContainers()
 })
 
@@ -662,6 +664,7 @@ watch(
   () => pageId.value,
   async (next) => {
     if (next) {
+      resetTabFilterState()
       await Promise.all([
         store.fetchPages(true),
         store.fetchTemplates(true),
@@ -719,6 +722,23 @@ watch(
   },
   { immediate: true },
 )
+watch(
+  () => activeTab.value,
+  (next, prev) => {
+    if (prev != null && prev !== next) {
+      persistTabFilterState(prev)
+    }
+    restoreTabFilterState(next)
+    ensurePageFilters(resolvedPageFilterKeys.value)
+    if (pivotBackendEnabled) {
+      queueBackendFilterRefresh('tab-change')
+      return
+    }
+    recalcPageFilterOptions()
+    recalcVisibleContainerFilterOptions()
+    refreshVisibleContainers()
+  },
+)
 const layoutStyle = computed(() => {
   const template = `repeat(${layoutSettings.value.columns}, minmax(0, 1fr))`
   return {
@@ -766,6 +786,7 @@ let backendFiltersTimer = null
 let backendFiltersAbortController = null
 let backendFiltersInFlightSignature = ''
 let backendFiltersInFlightScope = ''
+let lastTabFilterKeysSignature = ''
 const backendFiltersInFlightContainers = new Map()
 let backendFiltersPendingScope = ''
 let backendFiltersPageSignature = ''
@@ -775,12 +796,18 @@ const backendFiltersByContainer = {}
 const backendFilterMetaOverrides = reactive({})
 const pageFilterValues = reactive({})
 const pageFilterRanges = reactive({})
+const pageFilterValuesByTab = reactive({})
+const pageFilterRangesByTab = reactive({})
 const commonFilterKeys = computed(() =>
-  resolveCommonContainerFieldKeys(pageContainers.value, store.templates),
+  resolveCommonContainerFieldKeys(visibleContainers.value, store.templates),
+)
+const resolvedPageFilterKeys = computed(() => resolvePageFilterKeys())
+const hasResolvedPageFilters = computed(
+  () => resolvedPageFilterKeys.value.length > 0,
 )
 const globalFieldMetaMap = computed(() => buildGlobalFieldMetaMap())
 const pageFilterOptions = computed(() =>
-  commonFilterKeys.value.map((key) => {
+  resolvedPageFilterKeys.value.map((key) => {
     const descriptor = globalFieldMetaMap.value.get(key) || {}
     const metaOverride = backendFilterMetaOverrides[key] || {}
     const backendOptions = availablePageFilterValues[key]
@@ -851,7 +878,7 @@ const hasActivePageFilters = computed(() =>
   }),
 )
 const activePageFilterKeySet = computed(
-  () => new Set((page.value?.filters || []).filter(Boolean)),
+  () => new Set(activePageFilters.value.map((filter) => filter.key)),
 )
 const globalFilterValueMap = computed(() => buildGlobalFilterValueMap())
 const globalFilterRangeDefaults = computed(() => buildGlobalFilterRangeMap())
@@ -982,6 +1009,72 @@ function ensurePageFilters(keys = []) {
       delete pageFilterRanges[key]
     }
   })
+}
+
+function normalizeTabKey(tabId) {
+  return String(tabId || 1)
+}
+
+function cloneFilterValuesStore(store = {}) {
+  return Object.entries(store).reduce((acc, [key, values]) => {
+    acc[key] = Array.isArray(values) ? [...values] : []
+    return acc
+  }, {})
+}
+
+function cloneFilterRangesStore(store = {}) {
+  return Object.entries(store).reduce((acc, [key, range]) => {
+    const sanitized = sanitizeRange(range)
+    if (sanitized) {
+      acc[key] = { start: sanitized.start ?? null, end: sanitized.end ?? null }
+    }
+    return acc
+  }, {})
+}
+
+function replaceFilterValuesStore(next = {}) {
+  Object.keys(pageFilterValues).forEach((key) => {
+    delete pageFilterValues[key]
+  })
+  Object.entries(next || {}).forEach(([key, values]) => {
+    pageFilterValues[key] = Array.isArray(values) ? [...values] : []
+  })
+}
+
+function replaceFilterRangesStore(next = {}) {
+  Object.keys(pageFilterRanges).forEach((key) => {
+    delete pageFilterRanges[key]
+  })
+  Object.entries(next || {}).forEach(([key, range]) => {
+    const sanitized = sanitizeRange(range)
+    if (sanitized) {
+      pageFilterRanges[key] = { start: sanitized.start ?? null, end: sanitized.end ?? null }
+    }
+  })
+}
+
+function persistTabFilterState(tabId) {
+  const key = normalizeTabKey(tabId)
+  pageFilterValuesByTab[key] = cloneFilterValuesStore(pageFilterValues)
+  pageFilterRangesByTab[key] = cloneFilterRangesStore(pageFilterRanges)
+}
+
+function restoreTabFilterState(tabId) {
+  const key = normalizeTabKey(tabId)
+  replaceFilterValuesStore(pageFilterValuesByTab[key] || {})
+  replaceFilterRangesStore(pageFilterRangesByTab[key] || {})
+}
+
+function resetTabFilterState() {
+  Object.keys(pageFilterValuesByTab).forEach((key) => {
+    delete pageFilterValuesByTab[key]
+  })
+  Object.keys(pageFilterRangesByTab).forEach((key) => {
+    delete pageFilterRangesByTab[key]
+  })
+  replaceFilterValuesStore({})
+  replaceFilterRangesStore({})
+  lastTabFilterKeysSignature = ''
 }
 
 function templateFilters(container) {
@@ -1939,8 +2032,41 @@ function buildBackendFilters(containerId) {
 }
 
 function resolvePageFilterKeys() {
-  const keys = Array.isArray(page.value?.filters) ? page.value.filters : []
-  return [...new Set(keys.filter(Boolean))]
+  const containers = visibleContainers.value || []
+  let keys = commonFilterKeys.value || []
+  if (!keys.length && containers.length) {
+    const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
+    const fallback = []
+    const seen = new Set()
+    containers.forEach((container) => {
+      const tpl = templateMap.get(container.templateId)
+      if (!tpl) return
+      ;(tpl.snapshot?.filtersMeta || []).forEach((meta) => {
+        const key = meta?.key
+        if (!key || seen.has(key)) return
+        seen.add(key)
+        fallback.push(key)
+      })
+    })
+    keys = fallback
+  }
+  const resolved = [...new Set((keys || []).filter(Boolean))]
+  if (import.meta?.env?.DEV) {
+    const signature = JSON.stringify({
+      tabId: activeTab.value,
+      visible: containers.length,
+      keys: resolved,
+    })
+    if (signature !== lastTabFilterKeysSignature) {
+      lastTabFilterKeysSignature = signature
+      console.debug('tab filter keys', {
+        tabId: activeTab.value,
+        visibleContainers: containers.length,
+        filterKeys: resolved,
+      })
+    }
+  }
+  return resolved
 }
 
 function buildBackendSnapshot(tpl, commonKeys = []) {
@@ -2438,7 +2564,14 @@ function refreshContainers() {
     }
   })
   recalcPageFilterOptions()
-  recalcAllContainerFilterOptions()
+  recalcVisibleContainerFilterOptions()
+}
+
+function refreshVisibleContainers() {
+  const list = visibleContainers.value || []
+  list.forEach((container) => {
+    hydrateContainer(container)
+  })
 }
 
 async function refreshPageData() {
@@ -2805,7 +2938,7 @@ function globalFilterValueOptions(key) {
 function computeFilteredGlobalOptions(targetKey) {
   if (pivotBackendEnabled) return []
   if (!targetKey) return []
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   if (!containers.length) return []
   const values = new Map()
   containers.forEach((container) => {
@@ -2963,7 +3096,13 @@ function queueBackendFilterRefresh(scope = 'page', containerId = '') {
   if (!pivotBackendEnabled) return
   const pageSignature = buildPageFilterSignature()
   if (backendFiltersInFlightSignature === pageSignature) {
-    if (backendFiltersInFlightScope === 'page') return
+    const isTabChange = scope === 'tab-change'
+    if (
+      !isTabChange &&
+      (backendFiltersInFlightScope === 'page' ||
+        backendFiltersInFlightScope === 'tab-change')
+    )
+      return
     if (scope === 'container' && containerId) {
       const containerSignature = buildContainerFilterSignature(
         containerId,
@@ -2974,12 +3113,16 @@ function queueBackendFilterRefresh(scope = 'page', containerId = '') {
       }
     }
   }
-  if (scope === 'page') {
-    if (pageSignature === backendFiltersPageSignature) return
-    backendFiltersPendingScope = 'page'
+  if (scope === 'page' || scope === 'tab-change') {
+    if (scope === 'page' && pageSignature === backendFiltersPageSignature) return
+    backendFiltersPendingScope = scope
     backendFiltersPendingContainers.clear()
   } else if (containerId) {
-    if (backendFiltersPendingScope === 'page') return
+    if (
+      backendFiltersPendingScope === 'page' ||
+      backendFiltersPendingScope === 'tab-change'
+    )
+      return
     const containerSignature = buildContainerFilterSignature(
       containerId,
       pageSignature,
@@ -3003,9 +3146,11 @@ function queueBackendFilterRefresh(scope = 'page', containerId = '') {
 
 async function runBackendFilterRefresh() {
   const scope = backendFiltersPendingScope || 'page'
+  const baseContainers =
+    scope === 'tab-change' ? visibleContainers.value : pageContainers.value || []
   const containerIds =
-    scope === 'page'
-      ? (pageContainers.value || []).map((container) => container.id)
+    scope === 'page' || scope === 'tab-change'
+      ? baseContainers.map((container) => container.id)
       : Array.from(backendFiltersPendingContainers)
   backendFiltersPendingScope = ''
   backendFiltersPendingContainers.clear()
@@ -3047,6 +3192,12 @@ async function runBackendFilterRefresh() {
       }
       const filters = buildBackendFilters(id)
       const filterKeys = snapshot?.pivot?.filters || []
+      const selectedKeys = [
+        ...new Set([
+          ...Object.keys(filters?.globalFilters?.values || {}),
+          ...Object.keys(filters?.globalFilters?.ranges || {}),
+        ]),
+      ]
       const selectedValuesKeys = {
         global: Object.keys(filters?.globalFilters?.values || {}),
         container: Object.keys(filters?.containerFilters?.values || {}),
@@ -3056,6 +3207,11 @@ async function runBackendFilterRefresh() {
         container: Object.keys(filters?.containerFilters?.ranges || {}),
       }
       if (import.meta?.env?.DEV) {
+        console.debug('filters request summary', {
+          tabId: activeTab.value,
+          filterKeys,
+          selectedKeys,
+        })
         console.debug('backend filters request', {
           templateId: tpl.id,
           filterKeys,
@@ -3157,7 +3313,15 @@ async function runBackendFilterRefresh() {
         ),
       )
     })
-    if (scope === 'page' || pagePruned) {
+    if (scope === 'page') {
+      refreshContainers()
+      return
+    }
+    if (scope === 'tab-change') {
+      refreshVisibleContainers()
+      return
+    }
+    if (pagePruned) {
       refreshContainers()
       return
     }
@@ -3205,7 +3369,12 @@ function rebuildGlobalFilterOptions() {
   keys.forEach((key) => {
     result[key] = new Map()
   })
-  Object.values(backendFiltersByContainer).forEach((payload) => {
+  const containerIds = (visibleContainers.value || []).map(
+    (container) => container.id,
+  )
+  containerIds.forEach((id) => {
+    const payload = backendFiltersByContainer[id]
+    if (!payload) return
     const optionsMap = extractBackendOptionsMap(payload)
     keys.forEach((key) => {
       const options = optionsMap[key] || []
@@ -3350,11 +3519,11 @@ function applySelectedPrunedSelections(selectedPruned, containerId) {
 
 function recalcPageFilterOptions() {
   if (pivotBackendEnabled) {
-    queueBackendFilterRefresh('page')
+    queueBackendFilterRefresh('tab-change')
     return
   }
   const keys = activePageFilters.value.map((filter) => filter.key)
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   const result = {}
   keys.forEach((key) => {
     const values = new Map()
@@ -3442,8 +3611,15 @@ function recalcAllContainerFilterOptions() {
   })
 }
 
+function recalcVisibleContainerFilterOptions() {
+  const containers = visibleContainers.value || []
+  containers.forEach((container) => {
+    recalcContainerFilterOptions(container.id)
+  })
+}
+
 function buildGlobalFilterValueMap() {
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
   const aggregate = new Map()
   containers.forEach((container) => {
@@ -3463,7 +3639,7 @@ function buildGlobalFilterValueMap() {
 }
 
 function buildGlobalFieldMetaMap() {
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
   const result = new Map()
   containers.forEach((container) => {
@@ -3479,7 +3655,7 @@ function buildGlobalFieldMetaMap() {
 }
 
 function buildGlobalFilterRangeMap() {
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
   const ranges = new Map()
   containers.forEach((container) => {
@@ -3493,7 +3669,7 @@ function buildGlobalFilterRangeMap() {
 }
 
 function buildGlobalFilterModeMap() {
-  const containers = pageContainers.value || []
+  const containers = visibleContainers.value || []
   const templateMap = new Map(store.templates.map((tpl) => [tpl.id, tpl]))
   const modeBuckets = new Map()
   containers.forEach((container) => {
@@ -3669,7 +3845,7 @@ function buildHeaderMeta(tpl, metrics = [], view = null) {
 function scheduleRefresh() {
   clearTimeout(refreshTimer)
   refreshTimer = setTimeout(() => {
-    refreshContainers()
+    refreshVisibleContainers()
   }, 200)
 }
 
@@ -3700,12 +3876,15 @@ function abortContainerViewRequests(containerIds = []) {
 }
 
 watch(
-  () => page.value?.filters,
+  resolvedPageFilterKeys,
   (keys = []) => {
     ensurePageFilters(keys)
     if (pivotBackendEnabled) {
-      queueBackendFilterRefresh('page')
+      queueBackendFilterRefresh('tab-change')
+      return
     }
+    recalcPageFilterOptions()
+    recalcVisibleContainerFilterOptions()
   },
   { immediate: true },
 )
@@ -3735,9 +3914,9 @@ function resetPageFilters() {
   })
   if (pivotBackendEnabled) {
     abortContainerViewRequests(
-      (pageContainers.value || []).map((container) => container.id),
+      (visibleContainers.value || []).map((container) => container.id),
     )
-    queueBackendFilterRefresh('page')
+    queueBackendFilterRefresh('tab-change')
     return
   }
 }
@@ -3768,13 +3947,13 @@ function handlePageFilterValuesChange(key, values, forcedMode = '') {
   }
   if (pivotBackendEnabled) {
     abortContainerViewRequests(
-      (pageContainers.value || []).map((container) => container.id),
+      (visibleContainers.value || []).map((container) => container.id),
     )
-    queueBackendFilterRefresh('page')
+    queueBackendFilterRefresh('tab-change')
     return
   }
   recalcPageFilterOptions()
-  recalcAllContainerFilterOptions()
+  recalcVisibleContainerFilterOptions()
   if (forcedMode === 'range') {
     return
   }
@@ -3794,13 +3973,13 @@ function handlePageFilterRangeChange(key, range) {
     }
     if (pivotBackendEnabled) {
       abortContainerViewRequests(
-        (pageContainers.value || []).map((container) => container.id),
+        (visibleContainers.value || []).map((container) => container.id),
       )
-      queueBackendFilterRefresh('page')
+      queueBackendFilterRefresh('tab-change')
       return
     }
     recalcPageFilterOptions()
-    recalcAllContainerFilterOptions()
+    recalcVisibleContainerFilterOptions()
     scheduleRefresh()
     return
   }
@@ -3809,13 +3988,13 @@ function handlePageFilterRangeChange(key, range) {
   }
   if (pivotBackendEnabled) {
     abortContainerViewRequests(
-      (pageContainers.value || []).map((container) => container.id),
+      (visibleContainers.value || []).map((container) => container.id),
     )
-    queueBackendFilterRefresh('page')
+    queueBackendFilterRefresh('tab-change')
     return
   }
   recalcPageFilterOptions()
-  recalcAllContainerFilterOptions()
+  recalcVisibleContainerFilterOptions()
   scheduleRefresh()
 }
 
