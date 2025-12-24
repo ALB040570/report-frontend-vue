@@ -605,6 +605,7 @@ import { useAuthStore } from '@/shared/stores/auth'
 import { fetchRemoteRecords } from '@/shared/services/dataSources'
 import {
   fetchBackendFilters,
+  fetchBackendDetails,
   fetchBackendView,
   isPivotBackendEnabled,
   normalizeBackendView,
@@ -635,7 +636,21 @@ const router = useRouter()
 const store = usePageBuilderStore()
 const fieldDictionaryStore = useFieldDictionaryStore()
 const authStore = useAuthStore()
-const pageId = computed(() => route.params.pageId)
+const props = defineProps({
+  pageId: {
+    type: [String, Number],
+    default: '',
+  },
+})
+const pageId = computed(() => {
+  const propValue = props.pageId
+  if (propValue !== null && typeof propValue !== 'undefined') {
+    const normalized = String(propValue).trim()
+    if (normalized) return normalized
+  }
+  const routeValue = route.params.pageId
+  return routeValue != null ? String(routeValue) : ''
+})
 const page = computed(() => store.getPageById(pageId.value))
 const pageContainers = computed(
   () => store.pageContainers[pageId.value]?.items || [],
@@ -645,6 +660,8 @@ const dictionaryLabelsLower = computed(
   () => fieldDictionaryStore.labelMapLower || {},
 )
 const pivotBackendEnabled = isPivotBackendEnabled()
+const debugLogsEnabled =
+  String(import.meta.env.VITE_DEBUG_LOGS || '').toLowerCase() === 'true'
 
 onMounted(async () => {
   await Promise.all([
@@ -767,6 +784,8 @@ const detailDialog = reactive({
   columnLabel: '',
   metricLabel: '',
 })
+let detailDialogRequestId = 0
+let detailDialogAbortController = null
 const defaultColumnWidth = 150
 const defaultRowHeight = 48
 const defaultRowHeaderWidth = 200
@@ -825,7 +844,7 @@ const pageFilterOptions = computed(() =>
     const metaType =
       metaOverride.type || descriptor.type || (dateMeta ? 'string' : '')
     const rangeAllowed = !hasOptions && (modePreference === 'range' || hasRange)
-    if (import.meta?.env?.DEV && pivotBackendEnabled) {
+    if (debugLogsEnabled && pivotBackendEnabled) {
       console.debug('filter ui mode', key, {
         metaType,
         hasOptions,
@@ -1100,7 +1119,7 @@ function templateFilters(container) {
     const rangeAllowed =
       !hasOptions && (preferredMode === 'range' || Boolean(range))
     const metaType = metaOverride.type || fieldMeta?.[meta.key]?.type || ''
-    if (import.meta?.env?.DEV && pivotBackendEnabled) {
+    if (debugLogsEnabled && pivotBackendEnabled) {
       console.debug('filter ui mode', meta.key, {
         metaType,
         hasOptions,
@@ -1502,13 +1521,13 @@ function resolveRowHeaderLabel(row) {
       .map((value) => formatValue(value))
       .filter((value) => value && value !== '—')
     if (parts.length) {
-      if (import.meta.env.DEV) {
+      if (debugLogsEnabled) {
         console.debug('pivot row header', row?.key, row?.values, row?.label)
       }
       return parts.join(' • ')
     }
   }
-  if (import.meta.env.DEV) {
+  if (debugLogsEnabled) {
     console.debug('pivot row header', row?.key, row?.values, row?.label)
   }
   return row?.label || row?.key || ''
@@ -1521,13 +1540,13 @@ function resolveColumnHeaderLabel(column) {
       .map((value) => formatValue(value))
       .filter((value) => value && value !== '—')
     if (parts.length) {
-      if (import.meta.env.DEV) {
+      if (debugLogsEnabled) {
         console.debug('pivot col header', column?.key, column?.values, column?.label)
       }
       return parts.join(' • ')
     }
   }
-  if (import.meta.env.DEV) {
+  if (debugLogsEnabled) {
     console.debug('pivot col header', column?.key, column?.values, column?.label)
   }
   return column?.label || column?.key || ''
@@ -1570,6 +1589,10 @@ function canShowCellDetails(container, columnEntry) {
 }
 
 function closeDetailDialog() {
+  if (detailDialogAbortController) {
+    detailDialogAbortController.abort()
+    detailDialogAbortController = null
+  }
   detailDialog.visible = false
   detailDialog.containerId = ''
   detailDialog.loading = false
@@ -1579,7 +1602,7 @@ function closeDetailDialog() {
   detailDialog.total = 0
 }
 
-function handleCellDetails(container, row, columnEntry) {
+async function handleCellDetails(container, row, columnEntry) {
   if (!columnEntry || !canShowCellDetails(container, columnEntry)) return
   const tpl = template(container.templateId)
   if (!tpl) return
@@ -1607,6 +1630,55 @@ function handleCellDetails(container, row, columnEntry) {
   const columnsPivot = tpl.snapshot?.pivot?.columns || []
   const rowKey = row.key || '__all__'
   const columnKey = columnEntry.baseKey || '__all__'
+  if (pivotBackendEnabled) {
+    if (detailDialogAbortController) {
+      detailDialogAbortController.abort()
+    }
+    detailDialogRequestId += 1
+    const requestId = detailDialogRequestId
+    const controller = new AbortController()
+    detailDialogAbortController = controller
+    try {
+      const response = await fetchBackendDetails({
+        templateId: tpl.id,
+        remoteSource: tpl.remoteSource,
+        snapshot: buildBackendSnapshot(tpl, resolvePageFilterKeys()),
+        filters: buildBackendFilters(container.id),
+        rowKey,
+        columnKey,
+        metric: {
+          id: metric.id,
+          fieldKey: metric.fieldKey,
+          aggregator: metric.aggregator,
+          type: metric.type,
+        },
+        detailFields: detailDialog.fields.map((field) => field.key),
+        limit: 200,
+        offset: 0,
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || requestId !== detailDialogRequestId) {
+        return
+      }
+      const entries = Array.isArray(response?.entries) ? response.entries : []
+      detailDialog.entries = entries
+      detailDialog.total = Number(response?.total) || entries.length
+      detailDialog.loading = false
+      detailDialog.error = entries.length
+        ? ''
+        : 'Нет подробностей для этой ячейки.'
+    } catch (err) {
+      if (err?.name === 'AbortError') return
+      detailDialog.error =
+        err?.message || 'Не удалось получить детализацию.'
+      detailDialog.loading = false
+    } finally {
+      if (detailDialogAbortController === controller) {
+        detailDialogAbortController = null
+      }
+    }
+    return
+  }
   requestAnimationFrame(() => {
     try {
       const matched = (state.records || []).filter(
@@ -2051,7 +2123,7 @@ function resolvePageFilterKeys() {
     keys = fallback
   }
   const resolved = [...new Set((keys || []).filter(Boolean))]
-  if (import.meta?.env?.DEV) {
+  if (debugLogsEnabled) {
     const signature = JSON.stringify({
       tabId: activeTab.value,
       visible: containers.length,
@@ -2081,7 +2153,7 @@ function buildBackendSnapshot(tpl, commonKeys = []) {
         .filter(Boolean)
     : []
   const filterKeys = normalizedCommon.length ? normalizedCommon : metaKeys
-  if (!filterKeys.length && import.meta?.env?.DEV) {
+  if (!filterKeys.length && debugLogsEnabled) {
     console.warn(
       'Filter keys are empty; sending empty pivot.filters in backend payload.',
     )
@@ -3206,7 +3278,7 @@ async function runBackendFilterRefresh() {
         global: Object.keys(filters?.globalFilters?.ranges || {}),
         container: Object.keys(filters?.containerFilters?.ranges || {}),
       }
-      if (import.meta?.env?.DEV) {
+      if (debugLogsEnabled) {
         console.debug('filters request summary', {
           tabId: activeTab.value,
           filterKeys,
@@ -3235,7 +3307,7 @@ async function runBackendFilterRefresh() {
           },
           {},
         )
-        if (import.meta?.env?.DEV) {
+        if (debugLogsEnabled) {
           const rawKeys = Object.keys(data?.options || data?.values || {})
           console.debug('filters resp keys', rawKeys)
           console.debug('selectedPruned', data?.selectedPruned)
@@ -3289,7 +3361,7 @@ async function runBackendFilterRefresh() {
       prunedContainers.add(result.containerId)
     }
   })
-    if (import.meta?.env?.DEV) {
+    if (debugLogsEnabled) {
       successful.forEach((result) => {
         console.debug('backend filters response', {
           templateId:
@@ -4076,6 +4148,10 @@ onBeforeUnmount(() => {
   }
   if (backendFiltersAbortController) {
     backendFiltersAbortController.abort()
+  }
+  if (detailDialogAbortController) {
+    detailDialogAbortController.abort()
+    detailDialogAbortController = null
   }
   Object.values(containerStates).forEach((state) => {
     if (state?.viewAbortController) {

@@ -1231,6 +1231,8 @@ const isPivotSource = computed(() => {
   return pivotSourceIds.value.includes(dataSource.value)
 })
 const pivotBackendEnabled = isPivotBackendEnabled()
+const debugLogsEnabled =
+  String(import.meta.env.VITE_DEBUG_LOGS || '').toLowerCase() === 'true'
 const hasResultData = computed(() => {
   const value = result.value
   if (Array.isArray(value)) return value.length > 0
@@ -5288,13 +5290,13 @@ function resolveRowHeaderLabel(row) {
       .map((value) => formatValue(value))
       .filter((value) => value && value !== '—')
     if (parts.length) {
-      if (import.meta.env.DEV) {
+      if (debugLogsEnabled) {
         console.debug('pivot row header', row?.key, row?.values, row?.label)
       }
       return parts.join(' • ')
     }
   }
-  if (import.meta.env.DEV) {
+  if (debugLogsEnabled) {
     console.debug('pivot row header', row?.key, row?.values, row?.label)
   }
   return row?.label || row?.key || ''
@@ -5307,13 +5309,13 @@ function resolveColumnHeaderLabel(column) {
       .map((value) => formatValue(value))
       .filter((value) => value && value !== '—')
     if (parts.length) {
-      if (import.meta.env.DEV) {
+      if (debugLogsEnabled) {
         console.debug('pivot col header', column?.key, column?.values, column?.label)
       }
       return parts.join(' • ')
     }
   }
-  if (import.meta.env.DEV) {
+  if (debugLogsEnabled) {
     console.debug('pivot col header', column?.key, column?.values, column?.label)
   }
   return column?.label || column?.key || ''

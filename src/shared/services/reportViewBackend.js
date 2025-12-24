@@ -81,6 +81,52 @@ export async function fetchBackendFilters({
   return response.json()
 }
 
+export async function fetchBackendDetails({
+  templateId = '',
+  remoteSource,
+  snapshot,
+  filters,
+  rowKey,
+  columnKey,
+  metric,
+  detailFields = [],
+  limit,
+  offset,
+  signal,
+}) {
+  const baseUrl = normalizeBackendUrl(RAW_BACKEND_URL)
+  if (!baseUrl) {
+    console.error('VITE_REPORT_BACKEND_URL is missing')
+    throw new Error('Не задан адрес сервиса построения отчётов.')
+  }
+  const payload = {
+    templateId,
+    remoteSource,
+    snapshot,
+    filters,
+    rowKey,
+    columnKey,
+    metric,
+    detailFields,
+    limit,
+    offset,
+  }
+  const response = await fetch(`${baseUrl}/api/report/details`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  })
+  if (!response.ok) {
+    const details = await safeReadResponseText(response)
+    console.error('Report details backend error', response.status, details)
+    throw new Error('Не удалось получить детализацию.')
+  }
+  return response.json()
+}
+
 export function normalizeBackendView(backendView, metrics = []) {
   const safeView = backendView || {}
   const metricList = Array.isArray(metrics) ? metrics : []
