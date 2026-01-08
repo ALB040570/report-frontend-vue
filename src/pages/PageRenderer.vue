@@ -32,8 +32,11 @@
       </div>
     </header>
 
-    <div v-if="hasResolvedPageFilters" class="page-filters">
-      <div v-if="activePageFilters.length" class="page-filters__fields">
+    <div
+      v-if="hasResolvedPageFilters && activePageFilters.length"
+      class="page-filters"
+    >
+      <div class="page-filters__fields">
         <div
           v-for="filter in activePageFilters"
           :key="filter.key"
@@ -63,7 +66,6 @@
           />
         </div>
       </div>
-      <p v-else class="muted">Нет доступных фильтров для этой вкладки.</p>
       <div class="page-filters__actions">
         <button
           class="btn-outline btn-sm"
@@ -187,13 +189,18 @@
                 <thead>
                   <tr v-if="hasMetricGroups(container)" class="metric-header">
                     <th
+                      v-for="(label, index) in containerRowHeaderColumns(container)"
+                      :key="`row-header-${container.id}-${index}`"
                       :rowspan="containerRowHeaderRowSpan(container)"
-                      :style="rowHeaderStyle(container.id)"
+                      :style="
+                        rowHeaderStyle(container.id, containerRowHeaderColumnCount(container))
+                      "
                       class="row-header-title"
                     >
                       <div class="th-content">
-                        {{ containerRowHeaderTitle(container) }}
+                        {{ label }}
                         <span
+                          v-if="index === containerRowHeaderColumnCount(container) - 1"
                           class="resize-handle"
                           @mousedown.prevent="
                             startRowHeaderResize(container.id, $event)
@@ -216,6 +223,7 @@
                     <th
                       v-if="shouldShowRowTotals(container)"
                       :rowspan="containerRowHeaderRowSpan(container)"
+                      :colspan="containerRowTotalHeaders(container).length || 1"
                       class="column-field-group"
                     >
                       <span class="column-field-value">Итоги</span>
@@ -229,22 +237,30 @@
                       :key="`column-header-${container.id}-${rowIndex}`"
                       class="column-header-row"
                     >
-                      <th
+                      <template
                         v-if="!hasMetricGroups(container) && rowIndex === 0"
-                        :rowspan="containerColumnFieldRows(container).length"
-                        :style="rowHeaderStyle(container.id)"
-                        class="row-header-title"
                       >
-                        <div class="th-content">
-                          {{ containerRowHeaderTitle(container) }}
-                          <span
-                            class="resize-handle"
-                            @mousedown.prevent="
-                              startRowHeaderResize(container.id, $event)
-                            "
-                          ></span>
-                        </div>
-                      </th>
+                        <th
+                          v-for="(label, index) in containerRowHeaderColumns(container)"
+                          :key="`row-header-${container.id}-${rowIndex}-${index}`"
+                          :rowspan="containerColumnFieldRows(container).length"
+                          :style="
+                            rowHeaderStyle(container.id, containerRowHeaderColumnCount(container))
+                          "
+                          class="row-header-title"
+                        >
+                          <div class="th-content">
+                            {{ label }}
+                            <span
+                              v-if="index === containerRowHeaderColumnCount(container) - 1"
+                              class="resize-handle"
+                              @mousedown.prevent="
+                                startRowHeaderResize(container.id, $event)
+                              "
+                            ></span>
+                          </div>
+                        </th>
+                      </template>
                       <template
                         v-for="segment in headerRow.segments"
                         :key="`segment-${container.id}-${rowIndex}-${segment.metricId}`"
@@ -300,15 +316,19 @@
                       </th>
                     </tr>
                   </template>
-                  <tr v-else>
+                  <tr v-else-if="!hasMetricGroups(container)">
                     <th
-                      v-if="!hasMetricGroups(container)"
-                      :style="rowHeaderStyle(container.id)"
+                      v-for="(label, index) in containerRowHeaderColumns(container)"
+                      :key="`row-header-${container.id}-${index}`"
+                      :style="
+                        rowHeaderStyle(container.id, containerRowHeaderColumnCount(container))
+                      "
                       class="row-header-title"
                     >
                       <div class="th-content">
-                        {{ containerRowHeaderTitle(container) }}
+                        {{ label }}
                         <span
+                          v-if="index === containerRowHeaderColumnCount(container) - 1"
                           class="resize-handle"
                           @mousedown.prevent="
                             startRowHeaderResize(container.id, $event)
@@ -351,11 +371,52 @@
                 </thead>
                 <tbody>
                   <tr
-                    v-for="row in containerRowData(container)"
+                    v-for="(row, rowIndex) in containerRowData(container)"
                     :key="row.key"
                     :style="tableRowStyle(container.id, row.key)"
                   >
-                    <td class="row-label" :style="rowHeaderStyle(container.id)">
+                    <template v-if="containerUseRowHeaderColumns(container)">
+                      <template
+                        v-for="(cell, levelIndex) in containerRowHeaderMatrix(container)[rowIndex] || []"
+                        :key="`row-${row.key}-${levelIndex}`"
+                      >
+                        <td
+                          v-if="cell.show"
+                          :rowspan="cell.rowspan"
+                          class="row-label row-header-cell"
+                          :style="
+                            rowHeaderStyle(
+                              container.id,
+                              containerRowHeaderColumnCount(container),
+                            )
+                          "
+                        >
+                          <div class="row-content">
+                            <span>{{ cell.value }}</span>
+                          </div>
+                          <span
+                            v-if="
+                              levelIndex ===
+                              containerRowHeaderColumnCount(container) - 1
+                            "
+                            class="row-resize-handle"
+                            @mousedown.prevent="
+                              startTableRowResize(container.id, row.key, $event)
+                            "
+                          ></span>
+                        </td>
+                      </template>
+                    </template>
+                    <td
+                      v-else
+                      class="row-label"
+                      :style="
+                        rowHeaderStyle(
+                          container.id,
+                          containerRowHeaderColumnCount(container),
+                        )
+                      "
+                    >
                       <div
                         class="row-tree"
                         :style="{ paddingLeft: `${row.depth * 18}px` }"
@@ -427,9 +488,16 @@
                   "
                 >
                   <tr>
-                    <td v-if="shouldShowColumnTotals(container)">
+                    <td
+                      v-if="shouldShowColumnTotals(container)"
+                      :colspan="containerRowHeaderColumnCount(container)"
+                    >
                       ИТОГО
                     </td>
+                    <td
+                      v-else
+                      :colspan="containerRowHeaderColumnCount(container)"
+                    ></td>
                     <template v-if="shouldShowColumnTotals(container)">
                       <td
                         v-for="column in containerState(container.id).view
@@ -789,6 +857,8 @@ let detailDialogAbortController = null
 const defaultColumnWidth = 150
 const defaultRowHeight = 48
 const defaultRowHeaderWidth = 200
+const numericColumnWidth = 120
+const textColumnWidth = 200
 const supportedCharts = ['bar', 'line', 'pie']
 const chartPalette = [
   '#2b6cb0',
@@ -1337,14 +1407,38 @@ function containerRowHeaderTitle(container) {
   return containerState(container.id).meta?.rowHeaderTitle || 'Строки'
 }
 
+function containerRowHeaderFields(container) {
+  return containerState(container.id).meta?.rowHeaderFields || ['Строки']
+}
+
+function containerUseRowHeaderColumns(container) {
+  return Boolean(containerState(container.id).meta?.useRowHeaderColumns)
+}
+
+function containerRowHeaderColumns(container) {
+  if (containerUseRowHeaderColumns(container)) {
+    return containerRowHeaderFields(container)
+  }
+  return [containerRowHeaderTitle(container)]
+}
+
+function containerRowHeaderColumnCount(container) {
+  return containerRowHeaderColumns(container).length || 1
+}
+
+function containerRowHeaderMatrix(container) {
+  return containerState(container.id).meta?.rowHeaderMatrix || []
+}
+
 function containerColumnFieldRows(container) {
   return containerState(container.id).meta?.columnFieldRows || []
 }
 
 function containerRowHeaderRowSpan(container) {
   const metricRows = hasMetricGroups(container) ? 1 : 0
-  const columnRows = containerColumnFieldRows(container).length || 1
-  return metricRows + columnRows
+  const columnRows = containerColumnFieldRows(container).length
+  if (metricRows && !columnRows) return 1
+  return metricRows + (columnRows || 1)
 }
 
 function flattenRowTree(nodes = [], collapseState = {}) {
@@ -1375,9 +1469,21 @@ function tableSizing(containerId) {
     containerTableSizing[containerId] = {
       columnWidths: reactive({}),
       rowHeights: reactive({}),
+      rowHeaderAuto: true,
     }
   }
   return containerTableSizing[containerId]
+}
+
+function isTextColumn(column = {}) {
+  const format =
+    column?.metric?.outputFormat || column?.format || column?.outputFormat || ''
+  const aggregator = column?.metric?.aggregator || column?.aggregator || ''
+  return format === 'text' || aggregator === 'value'
+}
+
+function preferredColumnWidth(column = {}) {
+  return isTextColumn(column) ? textColumnWidth : numericColumnWidth
 }
 
 function tableColumnStyle(containerId, columnKey) {
@@ -1392,10 +1498,12 @@ function tableRowStyle(containerId, rowKey) {
   return { height: `${height}px` }
 }
 
-function rowHeaderStyle(containerId) {
+function rowHeaderStyle(containerId, columnCount = 1) {
   const sizing = tableSizing(containerId)
   const width = sizing.rowHeaderWidth || defaultRowHeaderWidth
-  return { width: `${width}px` }
+  const count = Math.max(Number(columnCount) || 1, 1)
+  const normalized = Math.max(120, Math.round(width / count))
+  return { width: `${normalized}px` }
 }
 
 function startTableColumnResize(containerId, columnKey, event) {
@@ -1436,6 +1544,7 @@ function startTableRowResize(containerId, rowKey, event) {
 
 function startRowHeaderResize(containerId, event) {
   const sizing = tableSizing(containerId)
+  sizing.rowHeaderAuto = false
   const startX = event.clientX
   const th = event.currentTarget.closest('th')
   const initial =
@@ -1452,12 +1561,17 @@ function startRowHeaderResize(containerId, event) {
   window.addEventListener('mouseup', onUp)
 }
 
-function syncTableSizing(containerId, view) {
+function syncTableSizing(containerId, view, rowHeaderColumns = 1) {
   const sizing = tableSizing(containerId)
   const columnKeys = new Set(view.columns.map((column) => column.key))
   Object.keys(sizing.columnWidths).forEach((key) => {
     if (!columnKeys.has(key) && key !== '__rows__') {
       delete sizing.columnWidths[key]
+    }
+  })
+  view.columns.forEach((column) => {
+    if (!Number.isFinite(sizing.columnWidths[column.key])) {
+      sizing.columnWidths[column.key] = preferredColumnWidth(column)
     }
   })
   const rowKeys =
@@ -1469,6 +1583,20 @@ function syncTableSizing(containerId, view) {
       delete sizing.rowHeights[key]
     }
   })
+  const headerColumns = Math.max(Number(rowHeaderColumns) || 1, 1)
+  const desiredRowHeaderWidth = Math.max(
+    defaultRowHeaderWidth,
+    headerColumns * textColumnWidth,
+  )
+  if (sizing.rowHeaderAuto !== false) {
+    if (
+      !Number.isFinite(sizing.rowHeaderWidth) ||
+      sizing.rowHeaderWidth < desiredRowHeaderWidth
+    ) {
+      sizing.rowHeaderWidth = desiredRowHeaderWidth
+      sizing.rowHeaderAuto = true
+    }
+  }
 }
 
 function collectTreeKeys(tree = []) {
@@ -1514,18 +1642,89 @@ function getColumnLevelValue(column, levelIndex) {
   return level.value || '—'
 }
 
-function resolveRowHeaderLabel(row) {
-  const values = Array.isArray(row?.values) ? row.values : []
-  if (values.length) {
-    const parts = values
-      .map((value) => formatValue(value))
-      .filter((value) => value && value !== '—')
-    if (parts.length) {
-      if (debugLogsEnabled) {
-        console.debug('pivot row header', row?.key, row?.values, row?.label)
-      }
-      return parts.join(' • ')
+function splitRowLabel(label = '') {
+  const value = String(label || '').trim()
+  if (!value) return []
+  const separators = [' / ', ' • ', ' › ']
+  for (const separator of separators) {
+    if (value.includes(separator)) {
+      return value.split(separator).map((part) => part.trim())
     }
+  }
+  return [value]
+}
+
+function resolveRowLevelValues(row, levelCount = 0) {
+  const levels = Array.isArray(row?.levels) ? row.levels : []
+  let values = []
+  if (levels.length) {
+    values = levels.map((level) => formatValue(level?.value))
+  } else if (Array.isArray(row?.values) && row.values.length) {
+    values = row.values.map((value) => formatValue(value))
+  } else if (row?.label) {
+    values = splitRowLabel(row.label).map((value) => formatValue(value))
+  }
+  if (!levelCount) return values
+  const normalized = values.slice(0, levelCount)
+  while (normalized.length < levelCount) {
+    normalized.push('—')
+  }
+  return normalized
+}
+
+function buildRowHeaderMatrix(rows = [], levelCount = 0) {
+  if (!rows.length || !levelCount) return []
+  const valuesList = rows.map((row) =>
+    resolveRowLevelValues(row, levelCount),
+  )
+  const matrix = valuesList.map((values) =>
+    values.map((value) => ({
+      value,
+      rowspan: 1,
+      show: true,
+    })),
+  )
+  const hasSamePrefix = (left, right, depth) => {
+    for (let index = 0; index < depth; index += 1) {
+      if (left[index] !== right[index]) return false
+    }
+    return true
+  }
+  for (let level = 0; level < levelCount; level += 1) {
+    let start = 0
+    while (start < rows.length) {
+      const current = valuesList[start]
+      const value = current[level]
+      let span = 1
+      let next = start + 1
+      while (
+        next < rows.length &&
+        valuesList[next][level] === value &&
+        hasSamePrefix(current, valuesList[next], level)
+      ) {
+        span += 1
+        next += 1
+      }
+      matrix[start][level].rowspan = span
+      for (let index = start + 1; index < start + span; index += 1) {
+        matrix[index][level].show = false
+        matrix[index][level].rowspan = 0
+      }
+      start += span
+    }
+  }
+  return matrix
+}
+
+function resolveRowHeaderLabel(row) {
+  const parts = resolveRowLevelValues(row).filter(
+    (value) => value && value !== '—',
+  )
+  if (parts.length) {
+    if (debugLogsEnabled) {
+      console.debug('pivot row header', row?.key, row?.values, row?.label)
+    }
+    return parts[parts.length - 1]
   }
   if (debugLogsEnabled) {
     console.debug('pivot row header', row?.key, row?.values, row?.label)
@@ -1566,10 +1765,12 @@ function flattenContainerRows(containerId, view) {
     key: row.key,
     label: row.label,
     fieldLabel: '',
-    depth: 0,
+    depth: Array.isArray(row.levels) ? Math.max(row.levels.length - 1, 0) : 0,
     hasChildren: false,
     cells: row.cells,
     totals: row.totals,
+    levels: row.levels || [],
+    values: row.values || [],
   }))
 }
 
@@ -2215,10 +2416,12 @@ function metricDisplayLabel(metric = {}) {
   const title =
     (typeof metric.title === 'string' && metric.title.trim()) ||
     (typeof metric.fieldLabel === 'string' && metric.fieldLabel.trim())
-  if (title) return title
-  if (typeof metric.label === 'string' && metric.label.trim()) {
-    return metric.label.trim()
+  if (metric.aggregator === 'count') {
+    return title || 'Количество'
   }
+  if (title) return title
+  const rawLabel = typeof metric.label === 'string' ? metric.label.trim() : ''
+  if (rawLabel) return rawLabel
   return metric.fieldKey || ''
 }
 
@@ -2350,9 +2553,8 @@ function buildChartTitle(metrics = []) {
 }
 
 function displayRowLabel(row, index) {
-  if (Array.isArray(row?.values) && row.values.length) {
-    return row.values.filter(Boolean).join(' • ')
-  }
+  const label = resolveRowHeaderLabel(row)
+  if (label) return label
   if (row?.label) return row.label
   return `Строка ${index + 1}`
 }
@@ -2367,7 +2569,9 @@ function displayColumnLabel(column, index) {
     .map((value) => value.trim())
     .filter((value) => value && (!normalizedMetric || normalizeLabelValue(value) !== normalizedMetric))
   if (categories.length) {
-    return categories.join(' • ')
+    const leaf = categories[categories.length - 1]
+    if (metricLabel) return `${leaf} • ${metricLabel}`
+    return leaf
   }
   const rawLabel = typeof column?.label === 'string' ? column.label : ''
   const stripped = stripMetricFromLabel(rawLabel, metricLabel)
@@ -2474,6 +2678,9 @@ async function hydrateContainer(container) {
   state.meta.metricGroups = []
   state.meta.columnFieldRows = []
   state.meta.rowHeaderTitle = 'Строки'
+  state.meta.rowHeaderFields = ['Строки']
+  state.meta.useRowHeaderColumns = false
+  state.meta.rowHeaderMatrix = []
 
   try {
     const metrics = prepareMetrics(tpl.snapshot?.metrics)
@@ -2586,7 +2793,14 @@ async function hydrateContainer(container) {
     state.meta.metricGroups = headerMeta.metricGroups
     state.meta.columnFieldRows = headerMeta.columnFieldRows
     state.meta.rowHeaderTitle = headerMeta.rowHeaderTitle
-    syncTableSizing(container.id, view)
+    state.meta.rowHeaderFields = headerMeta.rowHeaderFields || ['Строки']
+    const hasTree = Boolean(view.rowTree && view.rowTree.length)
+    state.meta.useRowHeaderColumns =
+      !hasTree && state.meta.rowHeaderFields.length > 1
+    state.meta.rowHeaderMatrix = state.meta.useRowHeaderColumns
+      ? buildRowHeaderMatrix(view.rows || [], state.meta.rowHeaderFields.length)
+      : []
+    syncTableSizing(container.id, view, headerMeta.rowHeaderFields?.length || 1)
     const collapseStore = rowCollapseStore(container.id)
     Object.keys(collapseStore).forEach((key) => {
       if (!(view.rowTree || []).some((node) => includesNodeKey(node, key))) {
@@ -2795,7 +3009,9 @@ function buildWorksheetRowsXml(container) {
   } else {
     const headerCells = []
     headerCells.push(metricGroups.length ? '' : headerMeta.rowHeaderTitle)
-    columns.forEach((column) => headerCells.push(column.label || ''))
+    columns.forEach((column, index) =>
+      headerCells.push(displayColumnLabel(column, index)),
+    )
     if (showRowTotals) {
       rowTotals.forEach((total) => headerCells.push(total.label || ''))
     }
@@ -2803,7 +3019,7 @@ function buildWorksheetRowsXml(container) {
   }
 
   rows.forEach((row) => {
-    const cells = [row.label || '']
+    const cells = [resolveRowHeaderLabel(row) || row.label || '']
     row.cells.forEach((cell) => cells.push(cell.display || ''))
     if (showRowTotals) {
       filterRowTotalsForExport(row.totals, rowTotalsSet).forEach((total) => {
@@ -3863,11 +4079,10 @@ function buildHeaderMeta(tpl, metrics = [], view = null) {
   const fieldMeta = snapshot?.fieldMeta || {}
   const rowFields = snapshot?.pivot?.rows || []
   const columnFields = snapshot?.pivot?.columns || []
-  const rowHeaderTitle = rowFields.length
-    ? rowFields
-        .map((key) => resolveFieldLabel(key, overrides, fieldMeta))
-        .join(' › ')
-    : 'Строки'
+  const rowHeaderFields = rowFields.length
+    ? rowFields.map((key) => resolveFieldLabel(key, overrides, fieldMeta))
+    : ['Строки']
+  const rowHeaderTitle = rowHeaderFields.join(' › ')
   const columns = view?.columns || []
   const metricGroups =
     columns.length && metrics.length
@@ -3909,6 +4124,7 @@ function buildHeaderMeta(tpl, metrics = [], view = null) {
       : []
   return {
     rowHeaderTitle,
+    rowHeaderFields,
     metricGroups,
     columnFieldRows,
   }
@@ -4412,6 +4628,7 @@ function editPage() {
 }
 .pivot-wrapper {
   overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid #dfe7f5;
   border-radius: 18px;
   background: #fff;
@@ -4502,6 +4719,10 @@ function editPage() {
   background: #f9fafb;
   border-right: 1px solid #edf2f7;
   color: #0f172a;
+}
+.pivot-table .row-header-cell {
+  text-align: left;
+  vertical-align: top;
 }
 .pivot-table tbody td {
   text-align: right;
@@ -4784,7 +5005,7 @@ function editPage() {
 .detail-table tr:last-child td {
   border-bottom: none;
 }
-</style>
+.metric-header .column-field-value {
   font-size: 13.5px;
   color: rgba(15, 23, 42, 0.85);
   padding-bottom: 4px;
@@ -4810,3 +5031,4 @@ function editPage() {
   border-left: 1px solid rgba(148, 163, 184, 0.15);
   padding-left: 14px;
 }
+</style>

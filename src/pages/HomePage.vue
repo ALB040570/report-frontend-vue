@@ -590,11 +590,13 @@
               <thead>
                 <tr v-if="metricColumnGroups.length" class="metric-header">
                   <th
+                    v-for="(label, index) in rowHeaderColumns"
+                    :key="`row-header-${index}`"
                     :rowspan="rowHeaderRowSpan"
                     :style="columnStyle('__rows__')"
                     class="row-header-title"
                   >
-                    {{ rowHeaderTitle }}
+                    {{ label }}
                   </th>
                   <th
                     v-for="group in metricColumnGroups"
@@ -610,7 +612,7 @@
                   <th
                     v-if="hasRowTotals"
                     :rowspan="rowHeaderRowSpan"
-                    class="column-field-group"
+                    class="column-field-group row-total-header"
                   >
                     <span class="column-field-label">Итоги</span>
                   </th>
@@ -664,8 +666,12 @@
                   </tr>
                 </template>
                 <tr v-else>
-                  <th :style="columnStyle('__rows__')">
-                    {{ rowHeaderTitle }}
+                  <th
+                    v-for="(label, index) in rowHeaderColumns"
+                    :key="`row-header-${index}`"
+                    :style="columnStyle('__rows__')"
+                  >
+                    {{ label }}
                   </th>
                   <th
                     v-for="column in pivotView.columns"
@@ -678,6 +684,7 @@
                     <th
                       v-for="total in rowTotalHeaders"
                       :key="`row-total-${total.metricId}`"
+                      class="row-total-header"
                     >
                       {{ total.label }}
                     </th>
@@ -686,11 +693,32 @@
               </thead>
               <tbody>
                 <tr
-                  v-for="row in tableRows"
+                  v-for="(row, rowIndex) in tableRows"
                   :key="row.key"
                   :style="rowStyle(row.key)"
                 >
-                  <td class="row-label">
+                  <template v-if="useRowHeaderColumns">
+                    <template
+                      v-for="(cell, levelIndex) in rowHeaderMatrix[rowIndex] || []"
+                      :key="`row-${row.key}-${levelIndex}`"
+                    >
+                      <td
+                        v-if="cell.show"
+                        :rowspan="cell.rowspan"
+                        class="row-label row-header-cell"
+                      >
+                        <div class="row-content">
+                          <span>{{ cell.value }}</span>
+                        </div>
+                        <span
+                          v-if="levelIndex === rowHeaderCellCount - 1"
+                          class="row-resize-handle"
+                          @mousedown.prevent="startRowResize(row.key, $event)"
+                        ></span>
+                      </td>
+                    </template>
+                  </template>
+                  <td v-else class="row-label">
                     <div
                       class="row-tree"
                       :style="{ paddingLeft: `${row.depth * 18}px` }"
@@ -2643,6 +2671,18 @@ const rowHeaderTitle = computed(() => {
     .map((key) => getFieldDisplayNameByKey(key))
     .join(' › ')
 })
+const rowHeaderFields = computed(() => {
+  if (!pivotConfig.rows.length) return ['Строки']
+  return pivotConfig.rows.map((key) => getFieldDisplayNameByKey(key))
+})
+const hasRowTree = computed(() => Boolean(pivotView.value?.rowTree?.length))
+const useRowHeaderColumns = computed(
+  () => !hasRowTree.value && rowHeaderFields.value.length > 1,
+)
+const rowHeaderColumns = computed(() =>
+  useRowHeaderColumns.value ? rowHeaderFields.value : [rowHeaderTitle.value],
+)
+const rowHeaderCellCount = computed(() => rowHeaderFields.value.length)
 const metricColumnGroups = computed(() => {
   const view = pivotView.value
   if (!view) return []
@@ -2713,11 +2753,58 @@ const tableRows = computed(() => {
     key: row.key,
     label: row.label,
     fieldLabel: '',
-    depth: 0,
+    depth: Array.isArray(row.levels) ? Math.max(row.levels.length - 1, 0) : 0,
     hasChildren: false,
     cells: row.cells,
     totals: row.totals,
+    levels: row.levels || [],
+    values: row.values || [],
   }))
+})
+const rowHeaderMatrix = computed(() => {
+  if (!useRowHeaderColumns.value) return []
+  const rows = tableRows.value
+  if (!rows.length) return []
+  const levelCount = rowHeaderFields.value.length
+  if (!levelCount) return []
+  const valuesList = rows.map((row) => resolveRowLevelValues(row, levelCount))
+  const matrix = valuesList.map((values) =>
+    values.map((value) => ({
+      value,
+      rowspan: 1,
+      show: true,
+    })),
+  )
+  const hasSamePrefix = (left, right, depth) => {
+    for (let index = 0; index < depth; index += 1) {
+      if (left[index] !== right[index]) return false
+    }
+    return true
+  }
+  for (let level = 0; level < levelCount; level += 1) {
+    let start = 0
+    while (start < rows.length) {
+      const current = valuesList[start]
+      const value = current[level]
+      let span = 1
+      let next = start + 1
+      while (
+        next < rows.length &&
+        valuesList[next][level] === value &&
+        hasSamePrefix(current, valuesList[next], level)
+      ) {
+        span += 1
+        next += 1
+      }
+      matrix[start][level].rowspan = span
+      for (let index = start + 1; index < start + span; index += 1) {
+        matrix[index][level].show = false
+        matrix[index][level].rowspan = 0
+      }
+      start += span
+    }
+  }
+  return matrix
 })
 
 const rowTotalMetricIds = computed(() =>
@@ -2814,7 +2901,7 @@ const chartConfig = computed(() => {
   if (!supportedChartTypes.includes(vizType.value)) return null
   const view = pivotView.value
   if (!view || !view.rows.length) return null
-  const labels = view.rows.map((row) => row.label || '—')
+  const labels = view.rows.map((row) => resolveRowHeaderLabel(row) || '—')
   let datasets = []
 
   if (view.columns.length) {
@@ -2825,7 +2912,7 @@ const chartConfig = computed(() => {
         return typeof cell?.value === 'number' ? Number(cell.value) : 0
       })
       return {
-        label: column.label,
+        label: formatColumnEntryLabel(column),
         data,
         backgroundColor: color,
         borderColor: color,
@@ -3387,6 +3474,9 @@ function formatSample(value) {
 function aggregatorLabel(aggregator, field) {
   const meta = getAggregatorMeta(aggregator)
   const aggName = meta?.label || aggregator
+  if (String(aggregator || '').toLowerCase() === 'count') {
+    return aggName
+  }
   const override = headerOverrides[field?.key]
   const fieldLabel = override?.trim() || field?.label || field?.key || 'поле'
   return `${aggName}: ${fieldLabel}`
@@ -5094,12 +5184,15 @@ function buildCsvFromPivot(
     ? view.rowTotalHeaders.filter((header) => rowAllowed.has(header.metricId))
     : []
 
-  const header = ['Строки', ...view.columns.map((col) => col.label)]
+  const header = ['Строки', ...view.columns.map((col) => formatColumnEntryLabel(col))]
   if (rowHeaders.length) {
     header.push(...rowHeaders.map((total) => total.label))
   }
   const rows = view.rows.map((row) => {
-    const cells = [row.label, ...row.cells.map((cell) => cell.display)]
+    const cells = [
+      resolveRowHeaderLabel(row),
+      ...row.cells.map((cell) => cell.display),
+    ]
     if (rowHeaders.length) {
       cells.push(
         ...row.totals
@@ -5295,18 +5388,45 @@ function getColumnLevelValue(column, levelIndex) {
   return level.value || '—'
 }
 
-function resolveRowHeaderLabel(row) {
-  const values = Array.isArray(row?.values) ? row.values : []
-  if (values.length) {
-    const parts = values
-      .map((value) => formatValue(value))
-      .filter((value) => value && value !== '—')
-    if (parts.length) {
-      if (debugLogsEnabled) {
-        console.debug('pivot row header', row?.key, row?.values, row?.label)
-      }
-      return parts.join(' • ')
+function splitRowLabel(label = '') {
+  const value = String(label || '').trim()
+  if (!value) return []
+  const separators = [' / ', ' • ', ' › ']
+  for (const separator of separators) {
+    if (value.includes(separator)) {
+      return value.split(separator).map((part) => part.trim())
     }
+  }
+  return [value]
+}
+
+function resolveRowLevelValues(row, levelCount = 0) {
+  const levels = Array.isArray(row?.levels) ? row.levels : []
+  let values = []
+  if (levels.length) {
+    values = levels.map((level) => formatValue(level?.value))
+  } else if (Array.isArray(row?.values) && row.values.length) {
+    values = row.values.map((value) => formatValue(value))
+  } else if (row?.label) {
+    values = splitRowLabel(row.label).map((value) => formatValue(value))
+  }
+  if (!levelCount) return values
+  const normalized = values.slice(0, levelCount)
+  while (normalized.length < levelCount) {
+    normalized.push('—')
+  }
+  return normalized
+}
+
+function resolveRowHeaderLabel(row) {
+  const parts = resolveRowLevelValues(row).filter(
+    (value) => value && value !== '—',
+  )
+  if (parts.length) {
+    if (debugLogsEnabled) {
+      console.debug('pivot row header', row?.key, row?.values, row?.label)
+    }
+    return parts[parts.length - 1]
   }
   if (debugLogsEnabled) {
     console.debug('pivot row header', row?.key, row?.values, row?.label)
@@ -5331,6 +5451,41 @@ function resolveColumnHeaderLabel(column) {
     console.debug('pivot col header', column?.key, column?.values, column?.label)
   }
   return column?.label || column?.key || ''
+}
+
+function resolveColumnLeafLabel(column) {
+  const values = Array.isArray(column?.values) ? column.values : []
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const raw = values[index]
+    if (raw !== null && typeof raw !== 'undefined' && raw !== '') {
+      return formatValue(raw)
+    }
+  }
+  const levels = Array.isArray(column?.levels) ? column.levels : []
+  for (let index = levels.length - 1; index >= 0; index -= 1) {
+    const value = levels[index]?.value
+    if (value !== null && typeof value !== 'undefined' && value !== '') {
+      return formatValue(value)
+    }
+  }
+  return ''
+}
+
+function findMetricLabel(metricId) {
+  if (!metricId) return ''
+  const match =
+    visibleMetrics.value.find((metric) => metric.id === metricId) ||
+    preparedMetrics.value.find((metric) => metric.id === metricId)
+  return match?.label || ''
+}
+
+function formatColumnEntryLabel(column) {
+  const leaf = resolveColumnLeafLabel(column)
+  const metricLabel = findMetricLabel(column?.metricId)
+  if (leaf && metricLabel && leaf !== metricLabel) {
+    return `${leaf} • ${metricLabel}`
+  }
+  return leaf || metricLabel || column?.label || column?.key || '—'
 }
 
 function getRawFieldLabel(key) {
@@ -6184,6 +6339,10 @@ function resolveMetricLabelById(metricId) {
   font-weight: 500;
   position: relative;
 }
+.row-header-cell {
+  text-align: left;
+  vertical-align: top;
+}
 .row-tree {
   display: flex;
   align-items: flex-start;
@@ -6216,6 +6375,15 @@ function resolveMetricLabelById(metricId) {
 .total,
 .grand-total {
   font-weight: 600;
+}
+.pivot-preview th.row-total-header,
+.pivot-preview td.total,
+.pivot-preview td.grand-total {
+  width: 140px;
+  max-width: 140px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .error {
   color: var(--s360-text-critical, #dc2626);
