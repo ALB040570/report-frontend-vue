@@ -341,6 +341,7 @@ export const useDataSourcesStore = defineStore('dataSources', {
       return this.userContext
     },
     async saveRemoteRecord(source) {
+      const previousId = source?.id
       const fallbackUserContext = loadExternalUserContext()
       const userContext = fallbackUserContext || (await this.fetchUserContext())
       const payload = buildRemotePayload(source, this.methodTypes, userContext)
@@ -354,8 +355,27 @@ export const useDataSourcesStore = defineStore('dataSources', {
       const saved = extractRecords(data)[0]
       if (saved) {
         source.remoteMeta = buildRemoteMeta(saved)
-        if (saved.id) {
-          source.id = String(saved.id)
+        if (saved.id !== null && typeof saved.id !== 'undefined') {
+          const normalizedId = String(saved.id)
+          source.id = normalizedId
+          const index = this.sources.findIndex(
+            (item) =>
+              item === source ||
+              item.id === previousId ||
+              String(item.remoteMeta?.id) === normalizedId,
+          )
+          if (index >= 0) {
+            const current = this.sources[index]
+            if (current !== source) {
+              this.sources.splice(index, 1, {
+                ...current,
+                ...source,
+                id: normalizedId,
+              })
+            } else if (current.id !== normalizedId) {
+              current.id = normalizedId
+            }
+          }
         }
         return source.id
       }

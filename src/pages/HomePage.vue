@@ -2948,16 +2948,28 @@ async function saveCurrentSource() {
   try {
     const result = await dataSourcesStore.saveSource(payload)
     const savedId = result?.id || payload.id
-    dataSource.value = savedId
+    dataSource.value = String(savedId)
     isCreatingSource.value = false
     pendingNewSourceName.value = ''
     if (result?.syncPromise?.then) {
       result.syncPromise
-        .then((remoteId) => {
+        .then(async (remoteId) => {
           if (!remoteId) return
           const normalized = String(remoteId)
-          if (normalized && dataSource.value !== normalized) {
-            dataSource.value = normalized
+          const match =
+            dataSources.value.find(
+              (source) => String(source.remoteMeta?.id) === normalized,
+            ) || dataSources.value.find((source) => source.id === normalized)
+          const nextId = match?.id || normalized
+          if (nextId && dataSource.value !== nextId) {
+            dataSource.value = nextId
+          }
+          if (match?.remoteMeta?.id) {
+            try {
+              await executeCurrentSource()
+            } catch (err) {
+              console.warn('Failed to auto execute source', err)
+            }
           }
         })
         .catch(() => {
