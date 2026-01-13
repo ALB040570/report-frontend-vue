@@ -793,6 +793,15 @@ const visibleContainers = computed(() => {
     (container) => (container.tabIndex || 1) === current,
   )
 })
+const hasMultiRequestSources = computed(() =>
+  visibleContainers.value.some((container) => {
+    const tpl = template(container.templateId)
+    return isMultiRequestSource(tpl?.remoteSource)
+  }),
+)
+const pivotBackendActive = computed(
+  () => pivotBackendEnabled && !hasMultiRequestSources.value,
+)
 watch(
   tabOptions,
   (options) => {
@@ -815,7 +824,7 @@ watch(
     }
     restoreTabFilterState(next)
     ensurePageFilters(resolvedPageFilterKeys.value)
-    if (pivotBackendEnabled) {
+    if (pivotBackendActive.value) {
       queueBackendFilterRefresh('tab-change')
       return
     }
@@ -901,7 +910,7 @@ const pageFilterOptions = computed(() =>
     const metaOverride = backendFilterMetaOverrides[key] || {}
     const backendOptions = availablePageFilterValues[key]
     const hasOptions =
-      pivotBackendEnabled &&
+      pivotBackendActive.value &&
       Array.isArray(backendOptions) &&
       backendOptions.length > 0
     const hasRange = globalFilterRangeDefaults.value.has(key)
@@ -914,7 +923,7 @@ const pageFilterOptions = computed(() =>
     const metaType =
       metaOverride.type || descriptor.type || (dateMeta ? 'string' : '')
     const rangeAllowed = !hasOptions && (modePreference === 'range' || hasRange)
-    if (debugLogsEnabled && pivotBackendEnabled) {
+    if (debugLogsEnabled && pivotBackendActive.value) {
       console.debug('filter ui mode', key, {
         metaType,
         hasOptions,
@@ -993,6 +1002,48 @@ function dataSourceLabel(tpl) {
   if (value === 'parameters') return 'Параметры'
   if (!value) return 'Не задан'
   return value
+}
+
+function resolveRemoteSourceBody(source) {
+  if (!source) return null
+  if (source.body && typeof source.body === 'object') {
+    return source.body
+  }
+  const raw =
+    source.body ??
+    source.rawBody ??
+    source.remoteMeta?.MethodBody ??
+    source.remoteMeta?.methodBody ??
+    ''
+  if (!raw) return null
+  if (typeof raw === 'object') return raw
+  if (typeof raw !== 'string') return null
+  try {
+    const parsed = JSON.parse(raw)
+    return typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function isMultiRequestSource(source) {
+  const body = resolveRemoteSourceBody(source)
+  return isMultiRequestBody(body)
+}
+
+function isMultiRequestBody(body) {
+  if (!isPlainObject(body)) return false
+  if (Array.isArray(body.requests) && body.requests.length) return true
+  return shouldSplitParamsIntoRequests(body.params)
+}
+
+function shouldSplitParamsIntoRequests(params) {
+  if (!Array.isArray(params) || params.length < 2) return false
+  return params.every((item) => isPlainObject(item))
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 function containerState(id) {
 if (!containerStates[id]) {
@@ -1178,7 +1229,7 @@ function templateFilters(container) {
     const availableOptions =
       availableContainerFilterValues[container.id]?.[meta.key]
     const hasOptions =
-      pivotBackendEnabled &&
+      pivotBackendActive.value &&
       Array.isArray(availableOptions) &&
       availableOptions.length > 0
     const preferredMode = hasOptions
@@ -1189,7 +1240,7 @@ function templateFilters(container) {
     const rangeAllowed =
       !hasOptions && (preferredMode === 'range' || Boolean(range))
     const metaType = metaOverride.type || fieldMeta?.[meta.key]?.type || ''
-    if (debugLogsEnabled && pivotBackendEnabled) {
+    if (debugLogsEnabled && pivotBackendActive.value) {
       console.debug('filter ui mode', meta.key, {
         metaType,
         hasOptions,
@@ -1324,7 +1375,7 @@ function templateOptions(container) {
 
 function containerFilterOptions(containerId, filter) {
   const available = availableContainerFilterValues[containerId]?.[filter.key]
-  if (pivotBackendEnabled && Array.isArray(available)) return available
+  if (pivotBackendActive.value && Array.isArray(available)) return available
   if (Array.isArray(available) && available.length) return available
   return fieldOptionsFromValues(filter.values)
 }
@@ -1831,7 +1882,7 @@ async function handleCellDetails(container, row, columnEntry) {
   const columnsPivot = tpl.snapshot?.pivot?.columns || []
   const rowKey = row.key || '__all__'
   const columnKey = columnEntry.baseKey || '__all__'
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     if (detailDialogAbortController) {
       detailDialogAbortController.abort()
     }
@@ -2716,7 +2767,7 @@ async function hydrateContainer(container) {
     }
 
     let baseView = null
-    if (pivotBackendEnabled) {
+    if (pivotBackendActive.value) {
       // TODO: pivot расчёт перенесён на FastAPI-бэк (/api/report/view).
       // Локальный buildPivotView оставлен как fallback до полной миграции.
       try {
@@ -3213,7 +3264,7 @@ function hasForcedFilterMode(filter) {
 
 function globalFilterValueOptions(key) {
   const available = availablePageFilterValues[key]
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     if (Array.isArray(available)) return available
     return globalFilterValueMap.value.get(key) || []
   }
@@ -3224,7 +3275,7 @@ function globalFilterValueOptions(key) {
 }
 
 function computeFilteredGlobalOptions(targetKey) {
-  if (pivotBackendEnabled) return []
+  if (pivotBackendActive.value) return []
   if (!targetKey) return []
   const containers = visibleContainers.value || []
   if (!containers.length) return []
@@ -3381,7 +3432,7 @@ function buildContainerFilterSignature(containerId, pageSignature) {
 }
 
 function queueBackendFilterRefresh(scope = 'page', containerId = '') {
-  if (!pivotBackendEnabled) return
+  if (!pivotBackendActive.value) return
   const pageSignature = buildPageFilterSignature()
   if (backendFiltersInFlightSignature === pageSignature) {
     const isTabChange = scope === 'tab-change'
@@ -3806,7 +3857,7 @@ function applySelectedPrunedSelections(selectedPruned, containerId) {
 }
 
 function recalcPageFilterOptions() {
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     queueBackendFilterRefresh('tab-change')
     return
   }
@@ -3845,7 +3896,7 @@ function recalcPageFilterOptions() {
 }
 
 function recalcContainerFilterOptions(containerId) {
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     queueBackendFilterRefresh('container', containerId)
     return
   }
@@ -4167,7 +4218,7 @@ watch(
   resolvedPageFilterKeys,
   (keys = []) => {
     ensurePageFilters(keys)
-    if (pivotBackendEnabled) {
+    if (pivotBackendActive.value) {
       queueBackendFilterRefresh('tab-change')
       return
     }
@@ -4180,7 +4231,7 @@ watch(
 watch(
   pageFilterValues,
   () => {
-    if (pivotBackendEnabled) return
+    if (pivotBackendActive.value) return
     scheduleRefresh()
   },
   { deep: true },
@@ -4189,7 +4240,7 @@ watch(
 watch(
   pageFilterRanges,
   () => {
-    if (pivotBackendEnabled) return
+    if (pivotBackendActive.value) return
     scheduleRefresh()
   },
   { deep: true },
@@ -4200,7 +4251,7 @@ function resetPageFilters() {
     pageFilterValues[filter.key] = []
     delete pageFilterRanges[filter.key]
   })
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests(
       (visibleContainers.value || []).map((container) => container.id),
     )
@@ -4213,7 +4264,7 @@ function resetContainerFilter(containerId, key) {
   const store = containerFilterStore(containerId)
   store[key] = []
   delete containerRangeStore(containerId)[key]
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests([containerId])
     queueBackendFilterRefresh('container', containerId)
     return
@@ -4233,7 +4284,7 @@ function handlePageFilterValuesChange(key, values, forcedMode = '') {
   if (forcedMode !== 'range') {
     delete pageFilterRanges[key]
   }
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests(
       (visibleContainers.value || []).map((container) => container.id),
     )
@@ -4259,7 +4310,7 @@ function handlePageFilterRangeChange(key, range) {
     if (pageFilterValues[key]?.length) {
       pageFilterValues[key] = []
     }
-    if (pivotBackendEnabled) {
+    if (pivotBackendActive.value) {
       abortContainerViewRequests(
         (visibleContainers.value || []).map((container) => container.id),
       )
@@ -4274,7 +4325,7 @@ function handlePageFilterRangeChange(key, range) {
   if (current) {
     delete pageFilterRanges[key]
   }
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests(
       (visibleContainers.value || []).map((container) => container.id),
     )
@@ -4302,7 +4353,7 @@ function handleContainerFilterValuesChange(containerId, filter, values) {
   if (!isContainerRangeFilter(filter)) {
     delete containerRangeStore(containerId)[key]
   }
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests([containerId])
     queueBackendFilterRefresh('container', containerId)
     return
@@ -4327,7 +4378,7 @@ function handleContainerFilterRangeChange(containerId, filter, range) {
       filterStore[key] = []
     }
     if (changedRange || filterStore[key]?.length === 0) {
-      if (pivotBackendEnabled) {
+      if (pivotBackendActive.value) {
         abortContainerViewRequests([containerId])
         queueBackendFilterRefresh('container', containerId)
         return
@@ -4340,14 +4391,14 @@ function handleContainerFilterRangeChange(containerId, filter, range) {
   }
   if (currentRange) {
     delete rangeStore[key]
-    if (pivotBackendEnabled) {
+    if (pivotBackendActive.value) {
       abortContainerViewRequests([containerId])
       queueBackendFilterRefresh('container', containerId)
       return
     }
     requestContainerRefresh(containerId)
   }
-  if (pivotBackendEnabled) {
+  if (pivotBackendActive.value) {
     abortContainerViewRequests([containerId])
     queueBackendFilterRefresh('container', containerId)
     return

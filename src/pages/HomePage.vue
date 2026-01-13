@@ -1135,6 +1135,7 @@ const EMPTY_BODY_TEMPLATE = JSON.stringify(
   null,
   2,
 )
+const REQUEST_FIELD_PREFIX = 'request'
 const HTTP_METHOD_FALLBACKS = ['POST', 'GET', 'PUT', 'PATCH']
 const joinTypeOptions = [
   { label: 'LEFT (все строки основного источника)', value: 'left' },
@@ -1865,30 +1866,35 @@ watch(
       const parsed = JSON.parse(value)
       rawBodyError.value = ''
       const methodValue = typeof parsed.method === 'string' ? parsed.method : ''
+      const isMultiBody = isMultiRequestBody(parsed)
       let paramPayload = null
       let container = 'array'
-      if (Array.isArray(parsed.params)) {
-        const firstEntry = parsed.params[0]
-        if (
-          firstEntry &&
-          typeof firstEntry === 'object' &&
-          !Array.isArray(firstEntry)
-        ) {
-          paramPayload = firstEntry
-        } else if (parsed.params.length) {
-          primitiveParams.value = parsed.params.map((item) =>
-            formatPrimitiveParam(item),
-          )
+      if (!isMultiBody) {
+        if (Array.isArray(parsed.params)) {
+          const firstEntry = parsed.params[0]
+          if (
+            firstEntry &&
+            typeof firstEntry === 'object' &&
+            !Array.isArray(firstEntry)
+          ) {
+            paramPayload = firstEntry
+          } else if (parsed.params.length) {
+            primitiveParams.value = parsed.params.map((item) =>
+              formatPrimitiveParam(item),
+            )
+          }
+        } else if (parsed.params && typeof parsed.params === 'object') {
+          paramPayload = parsed.params
+          container = 'object'
         }
-      } else if (parsed.params && typeof parsed.params === 'object') {
-        paramPayload = parsed.params
-        container = 'object'
       }
       syncingFromBody = true
       rpcMethod.value = methodValue
       paramContainerType.value = container
       structuredBodyAvailable.value = Boolean(paramPayload)
-      if (!paramPayload) {
+      if (isMultiBody) {
+        primitiveParams.value = []
+      } else if (!paramPayload) {
         if (!Array.isArray(parsed.params) || !parsed.params.length) {
           primitiveParams.value = []
         }
@@ -3129,16 +3135,21 @@ async function resolveUserContext() {
 
 async function loadFields() {
   if (planLoading.value) return
-  const requestPayload = resolveCurrentRequestPayload()
-  if (!requestPayload) return
+  const requestPayloads = resolveCurrentRequestPayload()
+  if (!requestPayloads) return
 
   const joins = normalizeJoinList(sourceDraft.joins || [])
   configsReady.value = false
   planLoading.value = true
   planError.value = ''
   try {
-    const response = await sendDataSourceRequest(requestPayload)
-    const baseRecords = extractRecordsFromResponse(response)
+    const responses = await Promise.all(
+      requestPayloads.map((entry) => sendDataSourceRequest(entry.request)),
+    )
+    const baseRecords = responses.flatMap((response, index) => {
+      const rows = extractRecordsFromResponse(response)
+      return applyRequestFields(rows, requestPayloads[index]?.meta?.fields)
+    })
     let mergedRecords = baseRecords
     let joinErrors = []
     if (joins.length && baseRecords.length) {
@@ -3205,7 +3216,7 @@ async function fetchJoinResults(joins = []) {
       }
     }
     const { payload, error } = buildRequestPayloadFromConfig(targetSource)
-    if (!payload || error) {
+    if (!payload || !payload.length || error) {
       return {
         index,
         join,
@@ -3216,8 +3227,13 @@ async function fetchJoinResults(joins = []) {
       }
     }
     try {
-      const response = await fetchJoinPayload(payload, { cache: true })
-      const rows = extractRecordsFromResponse(response)
+      const responses = await Promise.all(
+        payload.map((entry) => fetchJoinPayload(entry.request, { cache: true })),
+      )
+      const rows = responses.flatMap((response, responseIndex) => {
+        const records = extractRecordsFromResponse(response)
+        return applyRequestFields(records, payload[responseIndex]?.meta?.fields)
+      })
       return { index, join, records: rows }
     } catch (err) {
       return {
@@ -3248,7 +3264,7 @@ function resolveCurrentRequestPayload() {
     return null
   }
   const { payload, error } = buildRequestPayloadFromConfig(sourceDraft)
-  if (error || !payload) {
+  if (error || !payload || !payload.length) {
     planError.value = error || 'Не удалось подготовить запрос.'
     return null
   }
@@ -3267,7 +3283,12 @@ function buildRequestPayloadFromConfig(config = {}) {
       : { 'Content-Type': 'application/json' }
   const rawBody = config.rawBody?.trim() || ''
   if (method === 'GET') {
-    if (!rawBody) return { payload: { url, method, headers }, error: null }
+    if (!rawBody) {
+      return {
+        payload: [{ request: { url, method, headers }, meta: { fields: {} } }],
+        error: null,
+      }
+    }
     const parsed = safeJsonParse(rawBody)
     if (!parsed.ok) {
       return {
@@ -3275,22 +3296,173 @@ function buildRequestPayloadFromConfig(config = {}) {
         error: 'Параметры GET-запроса должны быть корректным JSON.',
       }
     }
-    return {
-      payload: { url, method, headers, body: parsed.value },
-      error: null,
-    }
+    const requests = buildRequestEntries(parsed.value, { url, method, headers })
+    return { payload: requests, error: null }
   }
   if (!rawBody) {
     return { payload: null, error: 'Добавьте тело запроса.' }
   }
   const parsed = safeJsonParse(rawBody)
-  if (!parsed.ok || !parsed.value) {
+  if (!parsed.ok || !parsed.value || !isPlainObject(parsed.value)) {
     return {
       payload: null,
       error: 'Тело запроса должно быть валидным JSON-объектом.',
     }
   }
-  return { payload: { url, method, headers, body: parsed.value }, error: null }
+  const requests = buildRequestEntries(parsed.value, { url, method, headers })
+  return { payload: requests, error: null }
+}
+
+function buildRequestEntries(body, baseRequest) {
+  if (!isPlainObject(body)) {
+    return [buildRequestEntry(baseRequest, body)]
+  }
+  // Multi-request format: { requests: [{ params: {...} }, ...] } or params: [{...}, {...}].
+  if (Array.isArray(body.requests) && body.requests.length) {
+    return buildRequestEntriesFromRequests(body, baseRequest)
+  }
+  if (shouldSplitParamsIntoRequests(body.params)) {
+    return buildRequestEntriesFromParams(body, baseRequest)
+  }
+  const paramsSource = extractParamsForFields(body)
+  return [buildRequestEntry(baseRequest, body, paramsSource)]
+}
+
+function buildRequestEntriesFromRequests(body, baseRequest) {
+  const baseBody = { ...body }
+  delete baseBody.requests
+  return body.requests
+    .map((entry) => buildRequestBodyFromEntry(baseBody, entry))
+    .filter(Boolean)
+    .map((item) =>
+      buildRequestEntry(baseRequest, item.body, item.paramsSource),
+    )
+}
+
+function buildRequestEntriesFromParams(body, baseRequest) {
+  const baseBody = { ...body }
+  delete baseBody.params
+  return body.params.map((paramsEntry) =>
+    buildRequestEntry(
+      baseRequest,
+      { ...baseBody, params: [paramsEntry] },
+      paramsEntry,
+    ),
+  )
+}
+
+function buildRequestBodyFromEntry(baseBody, entry) {
+  if (
+    isPlainObject(entry) &&
+    Object.prototype.hasOwnProperty.call(entry, 'body')
+  ) {
+    const mergedBody = { ...baseBody, ...entry.body }
+    return {
+      body: mergedBody,
+      paramsSource: extractParamsForFields(mergedBody),
+    }
+  }
+  if (
+    isPlainObject(entry) &&
+    Object.prototype.hasOwnProperty.call(entry, 'params')
+  ) {
+    return {
+      body: { ...baseBody, params: entry.params },
+      paramsSource: entry.params,
+    }
+  }
+  if (isPlainObject(entry)) {
+    return {
+      body: { ...baseBody, params: entry },
+      paramsSource: entry,
+    }
+  }
+  if (typeof entry !== 'undefined') {
+    return {
+      body: { ...baseBody, params: entry },
+      paramsSource: entry,
+    }
+  }
+  return null
+}
+
+function buildRequestEntry(baseRequest, body, paramsSource = null) {
+  const fields = buildRequestFieldsFromParams(paramsSource)
+  return {
+    request: {
+      url: baseRequest.url,
+      method: baseRequest.method,
+      headers: baseRequest.headers,
+      body,
+    },
+    meta: { fields },
+  }
+}
+
+function buildRequestFieldsFromParams(paramsSource) {
+  const paramsObject = resolveParamsObject(paramsSource)
+  if (!paramsObject) return {}
+  return Object.entries(paramsObject).reduce((acc, [key, value]) => {
+    const fieldKey = buildRequestFieldKey(key)
+    if (!fieldKey) return acc
+    acc[fieldKey] = value
+    return acc
+  }, {})
+}
+
+function buildRequestFieldKey(key) {
+  const raw = String(key ?? '').trim()
+  if (!raw) return ''
+  const tokens = raw.split(/[^a-zA-Z0-9]+/).filter(Boolean)
+  if (!tokens.length) return ''
+  const suffix = tokens
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')
+  return `${REQUEST_FIELD_PREFIX}${suffix}`
+}
+
+function extractParamsForFields(body) {
+  if (!isPlainObject(body)) return null
+  return resolveParamsObject(body.params)
+}
+
+function resolveParamsObject(params) {
+  if (isPlainObject(params)) return params
+  if (Array.isArray(params) && params.length === 1 && isPlainObject(params[0])) {
+    return params[0]
+  }
+  return null
+}
+
+function shouldSplitParamsIntoRequests(params) {
+  if (!Array.isArray(params) || params.length < 2) return false
+  return params.every((item) => isPlainObject(item))
+}
+
+function isMultiRequestBody(body) {
+  if (!isPlainObject(body)) return false
+  if (Array.isArray(body.requests) && body.requests.length) return true
+  return shouldSplitParamsIntoRequests(body.params)
+}
+
+function applyRequestFields(records, fields = {}) {
+  if (!Array.isArray(records) || !records.length) return records || []
+  const entries = Object.entries(fields || {})
+  if (!entries.length) return records
+  return records.map((record) => {
+    if (!record || typeof record !== 'object') return record
+    const next = { ...record }
+    entries.forEach(([key, value]) => {
+      if (!(key in next)) {
+        next[key] = value
+      }
+    })
+    return next
+  })
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function safeJsonParse(value = '') {
