@@ -131,7 +131,11 @@
               size="large"
             />
             <span
-              v-if="!structuredBodyAvailable && !hasPrimitiveParams"
+              v-if="
+                !structuredBodyAvailable &&
+                !hasPrimitiveParams &&
+                !multiParamsAvailable
+              "
               class="muted"
             >
               Добавьте параметры в формате объекта в «Raw body», чтобы
@@ -139,8 +143,159 @@
             </span>
           </label>
 
+          <div v-if="!multiParamsAvailable" class="params-table__starter">
+            <n-button size="small" quaternary @click="enableMultiParamTable">
+              Создать таблицу
+            </n-button>
+            <span class="muted">
+              Таблица удобна для ввода нескольких наборов параметров.
+            </span>
+          </div>
+
+          <div v-if="multiParamsAvailable" class="params-table">
+            <div class="params-table__actions">
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    quaternary
+                    circle
+                    aria-label="Добавить колонку"
+                    @click="addMultiParamColumn"
+                  >
+                    <span class="icon icon-columns" />
+                  </n-button>
+                </template>
+                Добавить колонку
+              </n-tooltip>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    quaternary
+                    circle
+                    aria-label="Добавить строку"
+                    @click="addMultiParamRow"
+                  >
+                    <span class="icon icon-rows" />
+                  </n-button>
+                </template>
+                Добавить строку
+              </n-tooltip>
+              <n-tooltip trigger="hover">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    quaternary
+                    :disabled="!canFillDownMultiParams"
+                    circle
+                    aria-label="Заполнить вниз"
+                    @click="fillDownMultiParam"
+                  >
+                    <span class="icon icon-down" />
+                  </n-button>
+                </template>
+                Копирует значение активной ячейки вниз по колонке.
+              </n-tooltip>
+            </div>
+            <p class="muted params-table__hint">
+              Вставляйте данные из Excel/Sheets (tab/CSV). Названия колонок
+              станут ключами параметров. «Заполнить вниз» копирует значение
+              активной ячейки по колонке.
+            </p>
+            <div class="params-table__grid">
+              <div class="params-table__row params-table__row--header">
+                <div class="params-table__cell params-table__cell--index">
+                  #
+                </div>
+                <div
+                  v-for="column in multiParamColumns"
+                  :key="column.id"
+                  class="params-table__cell params-table__cell--header"
+                  :class="resolveMultiParamColumnClass(column.id)"
+                >
+                  <div class="params-table__header-input">
+                    <n-input
+                      v-model:value="column.key"
+                      size="small"
+                      placeholder="ключ"
+                      :status="resolveMultiParamColumnStatus(column.id)"
+                      @paste="handleMultiParamHeaderPaste($event, column.id)"
+                    />
+                    <n-button
+                      quaternary
+                      circle
+                      size="tiny"
+                      aria-label="Удалить колонку"
+                      @click="removeMultiParamColumn(column.id)"
+                    >
+                      <span class="icon icon-close" />
+                    </n-button>
+                  </div>
+                </div>
+                <div class="params-table__cell params-table__cell--actions">
+                  Действия
+                </div>
+              </div>
+              <div
+                v-for="(row, rowIndex) in multiParamRows"
+                :key="row.id"
+                class="params-table__row"
+              >
+                <div class="params-table__cell params-table__cell--index">
+                  {{ rowIndex + 1 }}
+                </div>
+                <div
+                  v-for="column in multiParamColumns"
+                  :key="`${row.id}-${column.id}`"
+                  class="params-table__cell"
+                >
+                  <n-input
+                    v-model:value="row.values[column.id]"
+                    size="small"
+                    @focus="setActiveMultiParamCell(row.id, column.id)"
+                    @keydown="handleMultiParamKeydown($event, rowIndex, column.id)"
+                    @paste="handleMultiParamPaste($event, row.id, column.id)"
+                  />
+                </div>
+                <div class="params-table__cell params-table__cell--actions">
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button
+                        quaternary
+                        circle
+                        size="tiny"
+                        aria-label="Дублировать строку"
+                        @click="duplicateMultiParamRow(rowIndex)"
+                      >
+                        <span class="icon icon-duplicate" />
+                      </n-button>
+                    </template>
+                    Дублировать строку
+                  </n-tooltip>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button
+                        quaternary
+                        circle
+                        size="tiny"
+                        aria-label="Удалить строку"
+                        @click="removeMultiParamRow(rowIndex)"
+                      >
+                        <span class="icon icon-trash" />
+                      </n-button>
+                    </template>
+                    Удалить строку
+                  </n-tooltip>
+                </div>
+              </div>
+            </div>
+            <p v-if="multiParamColumnsWarning" class="muted">
+              {{ multiParamColumnsWarning }}
+            </p>
+          </div>
           <div
-            v-if="structuredBodyAvailable && parameterKeys.length"
+            v-else-if="structuredBodyAvailable && parameterKeys.length"
             class="params-grid"
           >
             <label v-for="key in parameterKeys" :key="key" class="field">
@@ -1151,6 +1306,10 @@ const rpcMethod = ref('')
 const bodyParams = reactive({})
 const bodyParamTypes = reactive({})
 const primitiveParams = ref([])
+const multiParamsAvailable = ref(false)
+const multiParamColumns = ref([])
+const multiParamRows = ref([])
+const activeMultiParamCell = reactive({ rowId: '', columnId: '' })
 const activeResultTab = ref('preview')
 const detailsVisible = ref(false)
 const paramContainerType = ref('array')
@@ -1301,6 +1460,50 @@ const canSendRequest = computed(() => {
 const canToggleDetails = computed(() => hasSourceContext.value)
 const parameterKeys = computed(() => Object.keys(bodyParams))
 const hasPrimitiveParams = computed(() => primitiveParams.value.length > 0)
+const multiParamColumnMeta = computed(() => {
+  const meta = {}
+  const counts = {}
+  multiParamColumns.value.forEach((column) => {
+    const key = String(column.key || '').trim()
+    if (key) {
+      counts[key] = (counts[key] || 0) + 1
+    }
+  })
+  multiParamColumns.value.forEach((column) => {
+    const key = String(column.key || '').trim()
+    meta[column.id] = {
+      key,
+      empty: !key,
+      duplicate: Boolean(key && counts[key] > 1),
+    }
+  })
+  return meta
+})
+const multiParamColumnsWarning = computed(() => {
+  const meta = multiParamColumnMeta.value
+  const emptyCount = Object.values(meta).filter((item) => item.empty).length
+  const duplicateKeys = Array.from(
+    new Set(
+      Object.values(meta)
+        .filter((item) => item.duplicate)
+        .map((item) => item.key),
+    ),
+  ).filter(Boolean)
+  if (!emptyCount && !duplicateKeys.length) return ''
+  const parts = []
+  if (emptyCount) {
+    parts.push('Есть пустые названия колонок. Они будут пропущены.')
+  }
+  if (duplicateKeys.length) {
+    parts.push(
+      `Повторяющиеся колонки: ${duplicateKeys.join(', ')}. Дубли будут пропущены.`,
+    )
+  }
+  return parts.join(' ')
+})
+const canFillDownMultiParams = computed(
+  () => Boolean(activeMultiParamCell.rowId && activeMultiParamCell.columnId),
+)
 const detailsTooltipLabel = computed(() =>
   shouldShowDetails.value ? 'Скрыть детали' : 'Показать детали',
 )
@@ -1844,6 +2047,7 @@ watch(visualizationTypes, () => {
 
 let syncingFromBody = false
 let syncingFromEditors = false
+let syncingFromEditorsTimer = null
 
 watch(
   () => sourceDraft.rawBody,
@@ -1853,12 +2057,15 @@ watch(
     if (!value) {
       rawBodyError.value = ''
       structuredBodyAvailable.value = false
+      multiParamsAvailable.value = false
       syncingFromBody = true
       rpcMethod.value = ''
       paramContainerType.value = 'array'
       syncReactiveObject(bodyParams, {})
       syncReactiveObject(bodyParamTypes, {})
       primitiveParams.value = []
+      multiParamColumns.value = []
+      multiParamRows.value = []
       syncingFromBody = false
       return
     }
@@ -1866,10 +2073,12 @@ watch(
       const parsed = JSON.parse(value)
       rawBodyError.value = ''
       const methodValue = typeof parsed.method === 'string' ? parsed.method : ''
-      const isMultiBody = isMultiRequestBody(parsed)
+      const tableEntries = extractMultiParamEntries(parsed)
+      const isTableBody =
+        tableEntries.length > 0 || isEmptyMultiParamTable(parsed)
       let paramPayload = null
       let container = 'array'
-      if (!isMultiBody) {
+      if (!isTableBody) {
         if (Array.isArray(parsed.params)) {
           const firstEntry = parsed.params[0]
           if (
@@ -1891,9 +2100,11 @@ watch(
       syncingFromBody = true
       rpcMethod.value = methodValue
       paramContainerType.value = container
+      multiParamsAvailable.value = isTableBody
       structuredBodyAvailable.value = Boolean(paramPayload)
-      if (isMultiBody) {
+      if (isTableBody) {
         primitiveParams.value = []
+        syncMultiParamTable(tableEntries)
       } else if (!paramPayload) {
         if (!Array.isArray(parsed.params) || !parsed.params.length) {
           primitiveParams.value = []
@@ -1912,11 +2123,14 @@ watch(
     } catch (err) {
       rawBodyError.value = err.message
       structuredBodyAvailable.value = false
+      multiParamsAvailable.value = false
       syncingFromBody = true
       paramContainerType.value = 'array'
       syncReactiveObject(bodyParams, {})
       syncReactiveObject(bodyParamTypes, {})
       primitiveParams.value = []
+      multiParamColumns.value = []
+      multiParamRows.value = []
       syncingFromBody = false
     }
   },
@@ -1947,9 +2161,7 @@ watch(
           ? normalizedParams
           : [normalizedParams]
     }
-    syncingFromEditors = true
-    sourceDraft.rawBody = JSON.stringify(parsed, null, 2)
-    syncingFromEditors = false
+    setRawBodyFromEditors(parsed)
   },
   { deep: true },
 )
@@ -1971,9 +2183,21 @@ watch(
     }
     parsed.method = method || parsed.method || ''
     parsed.params = params.map((value) => normalizePrimitiveValue(value))
-    syncingFromEditors = true
-    sourceDraft.rawBody = JSON.stringify(parsed, null, 2)
-    syncingFromEditors = false
+    setRawBodyFromEditors(parsed)
+  },
+  { deep: true },
+)
+
+watch(
+  () => ({
+    method: rpcMethod.value,
+    columns: multiParamColumns.value.map((column) => column.key),
+    rows: multiParamRows.value.map((row) => ({ ...row.values })),
+  }),
+  ({ method }) => {
+    if (syncingFromBody) return
+    if (!multiParamsAvailable.value) return
+    syncMultiParamBody(method)
   },
   { deep: true },
 )
@@ -4033,6 +4257,456 @@ function normalizeParamValues(values) {
   }, {})
 }
 
+function setRawBodyFromEditors(payload) {
+  syncingFromEditors = true
+  sourceDraft.rawBody = JSON.stringify(payload, null, 2)
+  deferSyncingFromEditorsReset()
+}
+
+function deferSyncingFromEditorsReset() {
+  if (syncingFromEditorsTimer) {
+    clearTimeout(syncingFromEditorsTimer)
+  }
+  syncingFromEditorsTimer = setTimeout(() => {
+    syncingFromEditors = false
+    syncingFromEditorsTimer = null
+  }, 0)
+}
+
+function enableMultiParamTable() {
+  if (rawBodyError.value) return
+  const rawValue = sourceDraft.rawBody?.trim()
+  let parsed = {}
+  if (rawValue) {
+    const parsedBody = safeJsonParse(rawValue)
+    if (parsedBody.ok && isPlainObject(parsedBody.value)) {
+      parsed = parsedBody.value
+    }
+  }
+  const method = rpcMethod.value || parsed.method || ''
+  const params = structuredBodyAvailable.value
+    ? normalizeParamValues(snapshotParams(bodyParams))
+    : null
+  parsed.method = method
+  parsed.params = params ? [params] : []
+  if ('requests' in parsed) {
+    delete parsed.requests
+  }
+  setRawBodyFromEditors(parsed)
+}
+
+function extractMultiParamEntries(body) {
+  if (!isPlainObject(body)) return []
+  if (Array.isArray(body.requests) && body.requests.length) {
+    return body.requests
+      .map((entry) => resolveMultiParamEntry(entry))
+      .filter((entry) => entry && isPlainObject(entry))
+  }
+  if (Array.isArray(body.params) && body.params.length) {
+    const entries = body.params.filter((entry) => isPlainObject(entry))
+    if (entries.length === body.params.length) {
+      return entries
+    }
+  }
+  return []
+}
+
+function isEmptyMultiParamTable(body) {
+  if (!isPlainObject(body)) return false
+  if (Array.isArray(body.requests) && body.requests.length === 0) {
+    return true
+  }
+  if (Array.isArray(body.params) && body.params.length === 0) {
+    return true
+  }
+  return false
+}
+
+function resolveMultiParamEntry(entry) {
+  if (!entry || !isPlainObject(entry)) return null
+  if (Object.prototype.hasOwnProperty.call(entry, 'params')) {
+    const params = resolveParamsObject(entry.params)
+    if (params && isPlainObject(params)) return params
+    if (isPlainObject(entry.params)) return entry.params
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, 'body')) {
+    const body = entry.body
+    if (isPlainObject(body) && Object.prototype.hasOwnProperty.call(body, 'params')) {
+      const params = resolveParamsObject(body.params)
+      if (params && isPlainObject(params)) return params
+      if (isPlainObject(body.params)) return body.params
+    }
+  }
+  return entry
+}
+
+function syncMultiParamTable(entries = []) {
+  const columns = buildMultiParamColumns(entries)
+  const rows = buildMultiParamRows(entries, columns)
+  multiParamColumns.value = columns
+  multiParamRows.value = rows.length ? rows : [createMultiParamRow(columns)]
+  if (!multiParamColumns.value.length) {
+    multiParamColumns.value = [createMultiParamColumn('')]
+    multiParamRows.value = [createMultiParamRow(multiParamColumns.value)]
+  }
+  if (!activeMultiParamCell.rowId && multiParamRows.value[0]) {
+    activeMultiParamCell.rowId = multiParamRows.value[0].id
+  }
+  if (!activeMultiParamCell.columnId && multiParamColumns.value[0]) {
+    activeMultiParamCell.columnId = multiParamColumns.value[0].id
+  }
+}
+
+function buildMultiParamColumns(entries = []) {
+  const keys = []
+  const seen = new Set()
+  entries.forEach((entry) => {
+    Object.keys(entry || {}).forEach((key) => {
+      if (!seen.has(key)) {
+        seen.add(key)
+        keys.push(key)
+      }
+    })
+  })
+  return keys.map((key) => createMultiParamColumn(key))
+}
+
+function buildMultiParamRows(entries = [], columns = []) {
+  return entries.map((entry) => {
+    const values = {}
+    columns.forEach((column) => {
+      values[column.id] = formatMultiParamValue(entry?.[column.key])
+    })
+    return {
+      id: createId(),
+      values,
+    }
+  })
+}
+
+function createMultiParamColumn(key) {
+  return {
+    id: createId(),
+    key: key || '',
+  }
+}
+
+function buildAutoColumnKey(existingKeys) {
+  let index = 1
+  while (existingKeys.has(`param${index}`)) {
+    index += 1
+  }
+  return `param${index}`
+}
+
+function createMultiParamRow(columns = [], values = {}) {
+  const rowValues = {}
+  columns.forEach((column) => {
+    rowValues[column.id] = values[column.id] ?? ''
+  })
+  return {
+    id: createId(),
+    values: rowValues,
+  }
+}
+
+function formatMultiParamValue(value) {
+  if (value === null || typeof value === 'undefined') return ''
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return ''
+    }
+  }
+  return String(value)
+}
+
+function resolveMultiParamColumns() {
+  const seen = new Set()
+  return multiParamColumns.value
+    .map((column) => ({
+      id: column.id,
+      key: String(column.key || '').trim(),
+    }))
+    .filter((column) => {
+      if (!column.key || seen.has(column.key)) return false
+      seen.add(column.key)
+      return true
+    })
+}
+
+function syncMultiParamBody(method = '') {
+  let parsed = {}
+  const rawValue = sourceDraft.rawBody?.trim()
+  if (rawValue) {
+    const parsedBody = safeJsonParse(rawValue)
+    if (parsedBody.ok && isPlainObject(parsedBody.value)) {
+      parsed = parsedBody.value
+    }
+  }
+  const columns = resolveMultiParamColumns()
+  const paramsList = multiParamRows.value
+    .map((row) => buildMultiParamRowPayload(row, columns))
+    .filter((row) => Object.keys(row).length)
+  parsed.method = method || parsed.method || ''
+  if (Array.isArray(parsed.requests)) {
+    parsed.requests = paramsList.map((params, index) =>
+      mergeMultiParamRequest(parsed.requests[index], params),
+    )
+  } else {
+    parsed.params = paramsList
+  }
+  setRawBodyFromEditors(parsed)
+}
+
+function buildMultiParamRowPayload(row, columns) {
+  return columns.reduce((acc, column) => {
+    const raw = row.values?.[column.id]
+    if (raw === '' || raw === null || typeof raw === 'undefined') {
+      return acc
+    }
+    acc[column.key] = normalizePrimitiveValue(raw)
+    return acc
+  }, {})
+}
+
+function mergeMultiParamRequest(existing, params) {
+  if (isPlainObject(existing)) {
+    if (Object.prototype.hasOwnProperty.call(existing, 'body')) {
+      const body = isPlainObject(existing.body) ? existing.body : {}
+      return { ...existing, body: { ...body, params } }
+    }
+    return { ...existing, params }
+  }
+  return { params }
+}
+
+function resolveMultiParamColumnStatus(columnId) {
+  const meta = multiParamColumnMeta.value[columnId]
+  if (!meta) return undefined
+  if (meta.duplicate) return 'error'
+  if (meta.empty) return 'warning'
+  return undefined
+}
+
+function resolveMultiParamColumnClass(columnId) {
+  const meta = multiParamColumnMeta.value[columnId]
+  if (!meta) return ''
+  if (meta.duplicate) return 'params-table__cell--error'
+  if (meta.empty) return 'params-table__cell--warning'
+  return ''
+}
+
+function setActiveMultiParamCell(rowId, columnId) {
+  activeMultiParamCell.rowId = rowId
+  activeMultiParamCell.columnId = columnId
+}
+
+function addMultiParamColumn() {
+  const column = createMultiParamColumn('')
+  multiParamColumns.value.push(column)
+  multiParamRows.value.forEach((row) => {
+    row.values[column.id] = ''
+  })
+}
+
+function removeMultiParamColumn(columnId) {
+  const index = multiParamColumns.value.findIndex(
+    (column) => column.id === columnId,
+  )
+  if (index < 0) return
+  multiParamColumns.value.splice(index, 1)
+  multiParamRows.value.forEach((row) => {
+    delete row.values[columnId]
+  })
+  if (activeMultiParamCell.columnId === columnId) {
+    activeMultiParamCell.columnId = ''
+  }
+}
+
+function addMultiParamRow() {
+  multiParamRows.value.push(createMultiParamRow(multiParamColumns.value))
+}
+
+function duplicateMultiParamRow(rowIndex) {
+  const existing = multiParamRows.value[rowIndex]
+  if (!existing) return
+  multiParamRows.value.splice(
+    rowIndex + 1,
+    0,
+    createMultiParamRow(multiParamColumns.value, { ...existing.values }),
+  )
+}
+
+function removeMultiParamRow(rowIndex) {
+  const existing = multiParamRows.value[rowIndex]
+  if (!existing) return
+  multiParamRows.value.splice(rowIndex, 1)
+  if (activeMultiParamCell.rowId === existing.id) {
+    activeMultiParamCell.rowId = ''
+  }
+}
+
+function fillDownMultiParam() {
+  if (!activeMultiParamCell.rowId || !activeMultiParamCell.columnId) return
+  const rowIndex = multiParamRows.value.findIndex(
+    (row) => row.id === activeMultiParamCell.rowId,
+  )
+  if (rowIndex < 0) return
+  const value = multiParamRows.value[rowIndex]?.values?.[
+    activeMultiParamCell.columnId
+  ]
+  for (let index = rowIndex + 1; index < multiParamRows.value.length; index += 1) {
+    multiParamRows.value[index].values[activeMultiParamCell.columnId] = value
+  }
+}
+
+function handleMultiParamPaste(event, rowId, columnId) {
+  const text = event?.clipboardData?.getData('text')
+  if (!text) return
+  const grid = parseMultiParamGrid(text)
+  if (!grid.length) return
+  event.preventDefault()
+  const startRowIndex = multiParamRows.value.findIndex(
+    (row) => row.id === rowId,
+  )
+  const startColumnIndex = multiParamColumns.value.findIndex(
+    (column) => column.id === columnId,
+  )
+  if (startRowIndex < 0 || startColumnIndex < 0) return
+  if (shouldUseHeaderRow(grid, startRowIndex)) {
+    const headerRow = grid[0] || []
+    ensureMultiParamColumns(startColumnIndex + headerRow.length)
+    headerRow.forEach((cell, colOffset) => {
+      const column = multiParamColumns.value[startColumnIndex + colOffset]
+      if (!column) return
+      column.key = String(cell ?? '').trim()
+    })
+    const bodyRows = grid.slice(1)
+    if (!bodyRows.length) return
+    applyMultiParamGrid(bodyRows, startRowIndex, startColumnIndex)
+    return
+  }
+  applyMultiParamGrid(grid, startRowIndex, startColumnIndex)
+}
+
+function handleMultiParamHeaderPaste(event, columnId) {
+  const text = event?.clipboardData?.getData('text')
+  if (!text) return
+  const grid = parseMultiParamGrid(text)
+  if (!grid.length) return
+  event.preventDefault()
+  const startColumnIndex = multiParamColumns.value.findIndex(
+    (column) => column.id === columnId,
+  )
+  if (startColumnIndex < 0) return
+  const headerRow = grid[0] || []
+  ensureMultiParamColumns(startColumnIndex + headerRow.length)
+  headerRow.forEach((cell, colOffset) => {
+    const column = multiParamColumns.value[startColumnIndex + colOffset]
+    if (!column) return
+    column.key = String(cell ?? '').trim()
+  })
+  const bodyRows = grid.slice(1)
+  if (!bodyRows.length) return
+  applyMultiParamGrid(bodyRows, 0, startColumnIndex)
+}
+
+function shouldUseHeaderRow(grid, startRowIndex) {
+  if (!Array.isArray(grid) || grid.length < 2) return false
+  const header = grid[0] || []
+  const hasLetters = header.some((cell) =>
+    /[A-Za-zА-Яа-я_]/.test(String(cell || '').trim()),
+  )
+  if (!hasLetters) return false
+  if (startRowIndex === 0) return true
+  if (columnsAreAutoGenerated()) return true
+  if (headerRowMatchesColumns(header)) return true
+  return false
+}
+
+function columnsAreAutoGenerated() {
+  return multiParamColumns.value.every((column) => {
+    const key = String(column.key || '').trim()
+    if (!key) return true
+    return /^param\d+$/i.test(key)
+  })
+}
+
+function headerRowMatchesColumns(header = []) {
+  const keys = new Set(
+    multiParamColumns.value.map((column) =>
+      String(column.key || '').trim().toLowerCase(),
+    ),
+  )
+  return header.some((cell) =>
+    keys.has(String(cell || '').trim().toLowerCase()),
+  )
+}
+
+function parseMultiParamGrid(raw = '') {
+  const normalized = String(raw || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+  if (!lines.length) return []
+  const trimmed = lines.filter(
+    (line, index) => line !== '' || index !== lines.length - 1,
+  )
+  if (!trimmed.length) return []
+  const delimiter = trimmed.some((line) => line.includes('\t')) ? '\t' : ','
+  return trimmed.map((line) => line.split(delimiter))
+}
+
+function applyMultiParamGrid(grid, startRowIndex, startColumnIndex) {
+  const maxColumns = grid.reduce(
+    (acc, row) => Math.max(acc, row.length),
+    0,
+  )
+  ensureMultiParamColumns(startColumnIndex + maxColumns)
+  const requiredRows = startRowIndex + grid.length
+  while (multiParamRows.value.length < requiredRows) {
+    addMultiParamRow()
+  }
+  grid.forEach((cells, rowOffset) => {
+    const row = multiParamRows.value[startRowIndex + rowOffset]
+    if (!row) return
+    cells.forEach((cell, colOffset) => {
+      const column = multiParamColumns.value[startColumnIndex + colOffset]
+      if (!column) return
+      row.values[column.id] = String(cell ?? '')
+    })
+  })
+}
+
+function ensureMultiParamColumns(requiredCount) {
+  const existingKeys = new Set(
+    multiParamColumns.value.map((column) => String(column.key || '').trim()),
+  )
+  while (multiParamColumns.value.length < requiredCount) {
+    const key = buildAutoColumnKey(existingKeys)
+    existingKeys.add(key)
+    const column = createMultiParamColumn(key)
+    multiParamColumns.value.push(column)
+    multiParamRows.value.forEach((row) => {
+      row.values[column.id] = ''
+    })
+  }
+}
+
+function handleMultiParamKeydown(event, rowIndex, columnId) {
+  if (!event) return
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+    event.preventDefault()
+    duplicateMultiParamRow(rowIndex)
+    const nextRow = multiParamRows.value[rowIndex + 1]
+    if (nextRow) {
+      setActiveMultiParamCell(nextRow.id, columnId)
+    }
+  }
+}
+
 function formatParamValueForBody(key, value) {
   const type = bodyParamTypes[key]
   if (type === 'number') {
@@ -5879,6 +6553,107 @@ function resolveMetricLabelById(metricId) {
 }
 .params-grid--compact {
   grid-template-columns: repeat(auto-fit, minmax(160px, 200px));
+}
+.params-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.params-table__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.params-table__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--s360-text-muted, #6b7280);
+}
+.params-table__grid {
+  border: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  border-radius: 12px;
+  overflow: auto;
+  max-height: 360px;
+}
+.params-table__row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+}
+.params-table__row:last-child {
+  border-bottom: none;
+}
+.params-table__row--header {
+  background: #f8fafc;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.params-table__cell {
+  padding: 8px;
+  min-width: 160px;
+  flex: 1 0 160px;
+  border-right: 1px solid var(--s360-color-border-subtle, #e5e7eb);
+  box-sizing: border-box;
+}
+.params-table__cell--header {
+  font-weight: 600;
+}
+.params-table__cell--index {
+  flex: 0 0 36px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--s360-text-muted, #6b7280);
+  position: sticky;
+  left: 0;
+  background: #fff;
+  z-index: 1;
+}
+.params-table__cell--actions {
+  flex: 0 0 96px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--s360-text-muted, #6b7280);
+}
+.params-table__row--header .params-table__cell--actions {
+  font-weight: 600;
+}
+.params-table__row--header .params-table__cell--index {
+  background: #f8fafc;
+  z-index: 3;
+}
+.params-table__cell:last-child {
+  border-right: none;
+}
+.params-table__header-input {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.params-table__cell--error .n-input__border {
+  border-color: #ef4444;
+}
+.params-table__cell--warning .n-input__border {
+  border-color: #f59e0b;
+}
+.params-table__starter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.icon-columns {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2318283a' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Crect x='3' y='4' width='6' height='16' rx='1'/%3E%3Crect x='15' y='4' width='6' height='16' rx='1'/%3E%3C/svg%3E");
+}
+.icon-rows {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2318283a' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Crect x='4' y='3' width='16' height='6' rx='1'/%3E%3Crect x='4' y='15' width='16' height='6' rx='1'/%3E%3C/svg%3E");
+}
+.icon-down {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2318283a' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='M12 5v14'/%3E%3Cpath d='m6 13 6 6 6-6'/%3E%3C/svg%3E");
+}
+.icon-duplicate {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' stroke='%2318283a' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Crect x='7' y='7' width='10' height='10' rx='1'/%3E%3Crect x='3' y='3' width='10' height='10' rx='1'/%3E%3C/svg%3E");
 }
 .raw-body {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
